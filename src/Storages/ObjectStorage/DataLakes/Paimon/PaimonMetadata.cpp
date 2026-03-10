@@ -49,6 +49,7 @@ extern const int BAD_ARGUMENTS;
 namespace Setting
 {
 extern const SettingsBool use_paimon_partition_pruning;
+extern const SettingsBool use_paimon_minmax_index_pruning;
 }
 
 DataLakeMetadataPtr PaimonMetadata::create(
@@ -184,17 +185,26 @@ ObjectIterator PaimonMetadata::iterate(
     Strings data_files;
     std::unordered_set<String> delete_files;
     std::optional<PartitionPruner> partition_pruner;
-    if (filter_dag_ && context_->getSettingsRef()[Setting::use_paimon_partition_pruning])
+    std::optional<MinMaxIndexPruner> minmax_pruner;
+    if (filter_dag_)
     {
-        auto filter_dag = filter_dag_->clone();
-        partition_pruner.emplace(*table_schema, filter_dag, getContext());
+        if (context_->getSettingsRef()[Setting::use_paimon_partition_pruning])
+        {
+            auto filter_dag = filter_dag_->clone();
+            partition_pruner.emplace(*table_schema, filter_dag, getContext());
+        }
+        if (context_->getSettingsRef()[Setting::use_paimon_minmax_index_pruning])
+        {
+            auto filter_dag = filter_dag_->clone();
+            minmax_pruner.emplace(*table_schema, filter_dag, getContext());
+        }
     }
     auto read_files = [&](const PaimonManifestEntry & file_entry)
     {
         if (partition_pruner.has_value() && partition_pruner->canBePruned(file_entry))
-        {
             return;
-        }
+        if (minmax_pruner.has_value() && minmax_pruner->canBePruned(file_entry))
+            return;
         if (file_entry.kind != PaimonManifestEntry::Kind::DELETE)
         {
             data_files.emplace_back(std::filesystem::path(table_path) / file_entry.file.bucket_path / file_entry.file.file_name);
