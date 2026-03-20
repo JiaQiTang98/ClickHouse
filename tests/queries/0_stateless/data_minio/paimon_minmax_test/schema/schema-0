@@ -13,12 +13,20 @@
     "id" : 2,
     "name" : "str_val",
     "type" : "STRING NOT NULL"
+  }, {
+    "id" : 3,
+    "name" : "ts3",
+    "type" : "TIMESTAMP(3) NOT NULL"
+  }, {
+    "id" : 4,
+    "name" : "ts1",
+    "type" : "TIMESTAMP(1) NOT NULL"
   } ],
-  "highestFieldId" : 2,
+  "highestFieldId" : 4,
   "partitionKeys" : [ ],
   "primaryKeys" : [ ],
   "options" : {
     "metadata.stats-store" : "fields-*"
   },
-  "timeMillis" : 1773035233279
+  "timeMillis" : 1773997001059
 }

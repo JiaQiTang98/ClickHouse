@@ -113,11 +113,11 @@ namespace Paimon
             if (partition_key_set.contains(field.name))
                 continue;
 
-            auto col_ast = std::make_shared<DB::ASTFunction>();
+            auto col_ast = DB::make_intrusive<DB::ASTFunction>();
             col_ast->name = "tuple";
-            col_ast->arguments = std::make_shared<DB::ASTExpressionList>();
+            col_ast->arguments = DB::make_intrusive<DB::ASTExpressionList>();
             col_ast->children.push_back(col_ast->arguments);
-            col_ast->arguments->children.emplace_back(std::make_shared<DB::ASTIdentifier>(field.name));
+            col_ast->arguments->children.emplace_back(DB::make_intrusive<DB::ASTIdentifier>(field.name));
 
             DB::NamesAndTypesList names_and_types;
             names_and_types.emplace_back(field.name, removeNullable(field.type.clickhouse_data_type));

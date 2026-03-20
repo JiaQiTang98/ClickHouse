@@ -66,6 +66,39 @@
             <version>1.20.1</version>
             <scope>compile</scope>
         </dependency>
+
+<!--        <dependency>-->
+<!--            <groupId>org.slf4j</groupId>-->
+<!--            <artifactId>slf4j-api</artifactId>-->
+<!--        </dependency>-->
+
+<!--        <dependency>-->
+<!--            <groupId>org.apache.logging.log4j</groupId>-->
+<!--            <artifactId>log4j-slf4j-impl</artifactId>-->
+<!--        </dependency>-->
+
+<!--        <dependency>-->
+<!--            <groupId>org.apache.logging.log4j</groupId>-->
+<!--            <artifactId>log4j-api</artifactId>-->
+<!--        </dependency>-->
+
+<!--        <dependency>-->
+<!--            <groupId>org.apache.logging.log4j</groupId>-->
+<!--            <artifactId>log4j-core</artifactId>-->
+<!--        </dependency>-->
+
+<!--        <dependency>-->
+<!--            &lt;!&ndash; API bridge between log4j 1 and 2 &ndash;&gt;-->
+<!--            <groupId>org.apache.logging.log4j</groupId>-->
+<!--            <artifactId>log4j-1.2-api</artifactId>-->
+<!--        </dependency>-->
+
+<!--        <dependency>-->
+<!--            <groupId>org.apache.logging.log4j</groupId>-->
+<!--            <artifactId>log4j-web</artifactId>-->
+<!--            <version>${log4j.version}</version>-->
+<!--            <scope>runtime</scope> &lt;!&ndash; 仅在运行时需要 &ndash;&gt;-->
+<!--        </dependency>-->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-java</artifactId>
@@ -93,7 +126,7 @@
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-table-runtime</artifactId>
             <version>1.20.1</version>
-            <scope>compile</scope>
+            <scope>compile</scope> <!-- 或 runtime，取决于部署方式 -->
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -111,14 +144,14 @@
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-clients</artifactId>
-            <version>1.20.1</version>
-            <scope>runtime</scope>
+            <version>1.20.1</version> <!-- 与你的 Flink 版本完全一致 -->
+            <scope>runtime</scope> <!-- 运行时必须存在 -->
         </dependency>
 
         <dependency>
             <groupId>commons-io</groupId>
             <artifactId>commons-io</artifactId>
-            <version>2.11.0</version>
+            <version>2.11.0</version> <!-- 使用最新稳定版本 -->
         </dependency>
         <dependency>
             <groupId>org.apache.flink</groupId>
@@ -126,6 +159,7 @@
             <version>1.20.1</version>
         </dependency>
 
+        <!-- 流处理 -->
         <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-streaming-java</artifactId>
@@ -135,7 +169,7 @@
         <dependency>
             <groupId>org.apache.iceberg</groupId>
             <artifactId>iceberg-core</artifactId>
-            <version>1.4.3</version>
+            <version>1.4.3</version> <!-- 推荐使用稳定版本 -->
         </dependency>
         <dependency>
             <groupId>org.apache.iceberg</groupId>

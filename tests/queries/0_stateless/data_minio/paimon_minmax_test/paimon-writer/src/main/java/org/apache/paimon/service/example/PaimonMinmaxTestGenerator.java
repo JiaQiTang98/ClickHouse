@@ -7,6 +7,7 @@ import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.data.Timestamp;
 import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.schema.Schema;
@@ -17,27 +18,9 @@ import org.apache.paimon.table.sink.CommitMessage;
 import org.apache.paimon.table.sink.TableWriteImpl;
 import org.apache.paimon.types.DataTypes;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
-/**
- * Generates the paimon_minmax_test dataset.
- *
- * Table schema (no partition, no primary key → append table):
- *   id      INT NOT NULL
- *   int_val INT NOT NULL
- *   str_val STRING NOT NULL
- *
- * Data is written in 3 separate commits so that each commit produces its own
- * data file with a non-overlapping int_val range:
- *
- *   Batch 1: ids 1-3, int_val [10, 30],   str_val a/b/c
- *   Batch 2: ids 4-6, int_val [110, 130], str_val d/e/f
- *   Batch 3: ids 7-9, int_val [210, 230], str_val g/h/i
- *
- * The table option "metadata.stats-store" = "fields-*" ensures that Paimon
- * writes per-column min/max statistics (_VALUE_STATS_COLS) into the manifest,
- * enabling StarRocks to prune files via min/max filtering.
- */
 public class PaimonMinmaxTestGenerator {
 
     private static final String DB_NAME    = "tests";
@@ -55,6 +38,8 @@ public class PaimonMinmaxTestGenerator {
                 .column("id",      DataTypes.INT().notNull())
                 .column("int_val", DataTypes.INT().notNull())
                 .column("str_val", DataTypes.STRING().notNull())
+                .column("ts3",     DataTypes.TIMESTAMP(3).notNull())
+                .column("ts1",     DataTypes.TIMESTAMP(1).notNull())
                 // "fields-*" = dense stats: record min/max for every column.
                 // This populates _VALUE_STATS_COLS in the manifest files so
                 // that readers can skip data files whose [min, max] range does
@@ -81,23 +66,38 @@ public class PaimonMinmaxTestGenerator {
         // Each batch uses its own BatchWriteBuilder → newWrite → prepareCommit
         // → commit cycle, which guarantees a separate data file per batch.
 
-        // Batch 1: int_val range [10, 30]
+        // Batch 1: int_val range [10, 30], ts range [2024-01-01 00:00 .. 12:00]
         writeBatch(table, rootPath,
                 new int[]    {  1,   2,   3 },
                 new int[]    { 10,  20,  30 },
-                new String[] { "a", "b", "c" });
+                new String[] { "a", "b", "c" },
+                new LocalDateTime[] {
+                        LocalDateTime.of(2024, 1, 1,  0,  0,  0),
+                        LocalDateTime.of(2024, 1, 1,  6,  0,  0),
+                        LocalDateTime.of(2024, 1, 1, 12,  0,  0),
+                });
 
-        // Batch 2: int_val range [110, 130]
+        // Batch 2: int_val range [110, 130], ts range [2024-06-15 08:00 .. 20:00]
         writeBatch(table, rootPath,
                 new int[]    {   4,    5,    6 },
                 new int[]    { 110,  120,  130 },
-                new String[] { "d", "e", "f" });
+                new String[] { "d", "e", "f" },
+                new LocalDateTime[] {
+                        LocalDateTime.of(2024, 6, 15,  8,  0,  0),
+                        LocalDateTime.of(2024, 6, 15, 14, 30,  0),
+                        LocalDateTime.of(2024, 6, 15, 20,  0,  0),
+                });
 
-        // Batch 3: int_val range [210, 230]
+        // Batch 3: int_val range [210, 230], ts range [2025-01-01 00:00 .. 23:59:59]
         writeBatch(table, rootPath,
                 new int[]    {   7,    8,    9 },
                 new int[]    { 210,  220,  230 },
-                new String[] { "g", "h", "i" });
+                new String[] { "g", "h", "i" },
+                new LocalDateTime[] {
+                        LocalDateTime.of(2025, 1, 1,  0,  0,  0),
+                        LocalDateTime.of(2025, 1, 1, 12,  0,  0),
+                        LocalDateTime.of(2025, 1, 1, 23, 59, 59),
+                });
 
         System.out.println("Done. Paimon table written to: " + rootPath
                 + "/" + DB_NAME + "/" + TABLE_NAME);
@@ -109,18 +109,20 @@ public class PaimonMinmaxTestGenerator {
      */
     private static void writeBatch(
             Table table, String ioTmpPath,
-            int[] ids, int[] intVals, String[] strVals) throws Exception {
+            int[] ids, int[] intVals, String[] strVals, LocalDateTime[] timestamps) throws Exception {
 
         BatchWriteBuilder writeBuilder = table.newBatchWriteBuilder();
         TableWriteImpl writer = (TableWriteImpl) writeBuilder.newWrite()
                 .withIOManager(new IOManagerImpl(ioTmpPath));
         try {
             for (int i = 0; i < ids.length; i++) {
-                // GenericRow field order must match schema: id, int_val, str_val
-                GenericRow row = new GenericRow(3);
+                // GenericRow field order must match schema: id, int_val, str_val, ts3, ts1
+                GenericRow row = new GenericRow(5);
                 row.setField(0, ids[i]);
                 row.setField(1, intVals[i]);
                 row.setField(2, BinaryString.fromString(strVals[i]));
+                row.setField(3, Timestamp.fromLocalDateTime(timestamps[i]));
+                row.setField(4, Timestamp.fromLocalDateTime(timestamps[i]));
                 writer.write(row);
             }
             List<CommitMessage> messages = writer.prepareCommit();
