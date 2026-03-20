@@ -1,0 +1,24 @@
+{
+  "version" : 3,
+  "id" : 0,
+  "fields" : [ {
+    "id" : 0,
+    "name" : "id",
+    "type" : "INT NOT NULL"
+  }, {
+    "id" : 1,
+    "name" : "int_val",
+    "type" : "INT NOT NULL"
+  }, {
+    "id" : 2,
+    "name" : "str_val",
+    "type" : "STRING NOT NULL"
+  } ],
+  "highestFieldId" : 2,
+  "partitionKeys" : [ ],
+  "primaryKeys" : [ ],
+  "options" : {
+    "metadata.stats-store" : "fields-*"
+  },
+  "timeMillis" : 1773035233279
+}
