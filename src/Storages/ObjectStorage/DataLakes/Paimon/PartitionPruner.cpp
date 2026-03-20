@@ -131,7 +131,6 @@ namespace Paimon
             if (cond->alwaysUnknownOrTrue())
                 continue;
 
-            
             cc.column_name = field.name;
             cc.schema_idx = field_idx;
             cc.condition = std::move(cond);
