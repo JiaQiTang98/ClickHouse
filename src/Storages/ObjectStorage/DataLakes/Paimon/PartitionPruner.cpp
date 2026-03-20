@@ -123,17 +123,17 @@ namespace Paimon
             names_and_types.emplace_back(field.name, removeNullable(field.type.clickhouse_data_type));
             DB::ColumnsDescription col_desc(names_and_types);
 
-            auto key_desc = DB::KeyDescription::getKeyFromAST(col_ast, col_desc, context);
+            ColumnCondition cc;
+            cc.key = DB::KeyDescription::getKeyFromAST(col_ast, col_desc, context);
             auto cond = std::make_unique<DB::KeyCondition>(
-                inverted_dag, context, key_desc.column_names, key_desc.expression, false /* not single_point */);
+                inverted_dag, context, cc.key.column_names, cc.key.expression, false /* not single_point */);
 
             if (cond->alwaysUnknownOrTrue())
                 continue;
 
-            ColumnCondition cc;
+            
             cc.column_name = field.name;
             cc.schema_idx = field_idx;
-            cc.key = std::move(key_desc);
             cc.condition = std::move(cond);
             cc.data_type = field.type;
             column_conditions.push_back(std::move(cc));
