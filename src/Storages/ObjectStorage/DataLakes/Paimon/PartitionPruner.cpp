@@ -147,7 +147,7 @@ namespace Paimon
 
         const auto & file = manifest_entry.file;
 
-        if (file.value_stats.min_values.empty())
+        if (file.value_stats.min_values.empty() || file.value_stats.max_values.empty())
             return false;
 
         BinaryRow min_row(file.value_stats.min_values);
