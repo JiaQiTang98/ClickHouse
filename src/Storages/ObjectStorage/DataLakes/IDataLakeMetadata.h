@@ -13,6 +13,7 @@
 #include <Storages/AlterCommands.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/ObjectStorage/DataLakes/DataLakeTableStateSnapshot.h>
+#include <Storages/ObjectStorage/ObjectStorageReadPipelineParams.h>
 #include <Storages/MutationCommands.h>
 #include <Storages/prepareReadingFromFormat.h>
 #include <Disks/DiskType.h>
@@ -162,6 +163,11 @@ public:
     virtual void checkMutationIsPossible(const MutationCommands & /*commands*/) { throwNotImplemented("mutations"); }
 
     virtual void addDeleteTransformers(ObjectInfoPtr, QueryPipelineBuilder &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const { }
+
+    /// Build a read topology of this data lake's own instead of the generic one-source-per-stream
+    /// read. See `StorageObjectStorageConfiguration::buildReadPipe` for the contract.
+    virtual std::optional<Pipe> buildReadPipe(const ObjectStorageReadPipelineParams &, ContextPtr) const { return std::nullopt; }
+
     virtual void checkAlterIsPossible(const AlterCommands & /*commands*/) { throwNotImplemented("alter"); }
     virtual void alter(
         const AlterCommands & /*params*/,

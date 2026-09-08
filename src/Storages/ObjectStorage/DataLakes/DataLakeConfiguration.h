@@ -395,6 +395,11 @@ public:
         getMetadata()->addDeleteTransformers(object_info, builder, format_settings, parser_shared_resources, local_context);
     }
 
+    std::optional<Pipe> buildReadPipe(const ObjectStorageReadPipelineParams & params, ContextPtr local_context) const override
+    {
+        return getMetadata()->buildReadPipe(params, local_context);
+    }
+
     void fromDisk(const String & disk_name, ASTs & args, ContextPtr context, bool with_structure) override
     {
         if (!Context::getGlobalContextInstance()->getAllowedDisksForTableEngines().contains(disk_name))

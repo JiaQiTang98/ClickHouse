@@ -15,6 +15,7 @@
 #include <Storages/StorageFactory.h>
 #include <Formats/FormatFilterInfo.h>
 #include <Storages/ObjectStorage/DataLakes/IDataLakeMetadata.h>
+#include <Storages/ObjectStorage/ObjectStorageReadPipelineParams.h>
 #include <optional>
 #include <Databases/DataLake/StorageCredentials.h>
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
@@ -177,6 +178,25 @@ public:
         const std::optional<FormatSettings> & format_settings,
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const;
+
+    /// Build the read topology for tables whose rows cannot be produced by independent per-file
+    /// sources — for example merge-on-read tables, where the data files of one bucket only give
+    /// the correct rows once merged together. Returns std::nullopt to use the generic
+    /// one-source-per-stream read of `ReadFromObjectStorageStep::initializePipeline`.
+    ///
+    /// The step keeps ownership of everything around the returned pipe: the `NullSource` for an
+    /// empty read, the `parallelize_output_from_storages` resize, registering the processors and
+    /// initializing the pipeline. What an implementation must uphold:
+    ///  - the pipe's header must be exactly `params.info.source_header`, and `params.info` is the
+    ///    only valid version of the read info — do not recompute it, it may already have been
+    ///    rewritten by `updatePrewhereInfo`;
+    ///  - `params.need_only_count` must be honoured, otherwise `count` returns a wrong result;
+    ///  - a custom topology usually breaks the lazy materialization contract (per-file physical row
+    ///    numbers registered in `params.lazy_row_index_registry` and a `__global_row_index` column),
+    ///    so `supportsLazyMaterialization` has to be turned off along with it;
+    ///  - consume `params.iterator` rather than listing the data files again, so that distributed
+    ///    processing, archives and file progress reporting stay in one place.
+    virtual std::optional<Pipe> buildReadPipe(const ObjectStorageReadPipelineParams &, ContextPtr) const { return std::nullopt; }
 
     virtual ReadFromFormatInfo prepareReadingFromFormat(
         ObjectStoragePtr object_storage,

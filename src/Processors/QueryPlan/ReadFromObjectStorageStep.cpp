@@ -10,8 +10,7 @@
 #include <IO/ReadHelpers.h>
 #include <IO/Operators.h>
 #include <Storages/ObjectStorage/S3/Configuration.h>
-#include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergMetadata.h>
-#include <Storages/ObjectStorage/DataLakes/DataLakeConfiguration.h>
+#include <Storages/ObjectStorage/ObjectStorageReadPipelineParams.h>
 #include <Processors/QueryPlan/QueryPlanStepRegistry.h>
 #include <Formats/FormatFactory.h>
 #include <Formats/FormatParserSharedResources.h>
@@ -107,7 +106,6 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
 {
     createIterator();
 
-    Pipes pipes;
     auto context = getContext();
     size_t estimated_keys_count = iterator_wrapper->estimatedKeysCount();
 
@@ -130,34 +128,65 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
         query_info.row_level_filter,
         query_info.prewhere_info);
 
-    for (size_t i = 0; i < num_streams; ++i)
-    {
-        auto source = std::make_shared<StorageObjectStorageSource>(
-            storage_id,
-            getName(),
-            object_storage,
-            configuration,
-            storage_snapshot,
-            info,
-            format_settings,
-            context,
-            max_block_size,
-            iterator_wrapper,
-            parser_shared_resources,
-            format_filter_info,
-            need_only_count,
-            lazy_row_index_registry);
+    /// `max_num_streams` is a read-parallelism request, not a thread budget.
+    const size_t resize_to = std::min(max_num_streams, build_settings.max_threads);
 
-        pipes.emplace_back(std::move(source));
+    const ObjectStorageReadPipelineParams params
+    {
+        .storage_id = storage_id,
+        .object_storage = object_storage,
+        .configuration = configuration,
+        .storage_snapshot = storage_snapshot,
+        .info = info,
+        .format_settings = format_settings,
+        .iterator = iterator_wrapper,
+        .parser_shared_resources = parser_shared_resources,
+        .format_filter_info = format_filter_info,
+        .lazy_row_index_registry = lazy_row_index_registry,
+        .max_block_size = max_block_size,
+        .num_streams = num_streams,
+        .max_parallel_output_streams = resize_to,
+        .need_only_count = need_only_count,
+    };
+
+    Pipe pipe;
+    if (auto custom_pipe = configuration->buildReadPipe(params, context))
+    {
+        pipe = std::move(*custom_pipe);
     }
-    auto pipe = Pipe::unitePipes(std::move(pipes));
+    else
+    {
+        Pipes pipes;
+        for (size_t i = 0; i < num_streams; ++i)
+        {
+            auto source = std::make_shared<StorageObjectStorageSource>(
+                storage_id,
+                getName(),
+                object_storage,
+                configuration,
+                storage_snapshot,
+                info,
+                format_settings,
+                context,
+                max_block_size,
+                iterator_wrapper,
+                parser_shared_resources,
+                format_filter_info,
+                need_only_count,
+                lazy_row_index_registry);
+
+            pipes.emplace_back(std::move(source));
+        }
+        pipe = Pipe::unitePipes(std::move(pipes));
+    }
+
     if (pipe.empty())
         pipe = Pipe(std::make_shared<NullSource>(std::make_shared<const Block>(info.source_header)));
+    else
+        assertBlocksHaveEqualStructure(pipe.getHeader(), info.source_header, STEP_NAME);
 
     size_t output_ports = pipe.numOutputPorts();
     const bool parallelize_output = context->getSettingsRef()[Setting::parallelize_output_from_storages];
-    /// `max_num_streams` is a read-parallelism request, not a thread budget.
-    const size_t resize_to = std::min(max_num_streams, build_settings.max_threads);
     if (parallelize_output
         && FormatFactory::instance().checkParallelizeOutputAfterReading(configuration->format, context)
         && output_ports > 0 && output_ports < resize_to)
