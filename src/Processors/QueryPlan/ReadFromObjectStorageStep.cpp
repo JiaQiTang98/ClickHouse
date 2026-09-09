@@ -2,6 +2,7 @@
 #include <Processors/QueryPlan/LazilyReadFromObjectStorage.h>
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Core/Settings.h>
+#include <Storages/ObjectStorage/SelfOpeningObjectStorageSource.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Processors/Sources/NullSource.h>
@@ -36,6 +37,11 @@ namespace Setting
 {
     extern const SettingsBool parallelize_output_from_storages;
     extern const SettingsBool s3_validate_etag_on_read;
+}
+
+namespace ErrorCodes
+{
+    extern const int NOT_IMPLEMENTED;
 }
 
 
@@ -128,6 +134,44 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
         query_info.row_level_filter,
         query_info.prewhere_info);
 
+    /// How a read unit of this table is produced. The same for the whole read, so it is resolved
+    /// once here, at pipeline-build time, rather than per object during the read: the assumptions a
+    /// non-`FormatFile` kind breaks (see the gates below) live at plan level, and an engine that
+    /// cannot serve the requested kind should say so before any worker thread starts reading.
+    const auto read_unit_kind = configuration->getReadUnitKind(context);
+
+    ReadUnitOpener unit_opener;
+    if (read_unit_kind != ReadUnitKind::FormatFile)
+    {
+        /// `createFileIterator` short-circuits to a `ReadTaskIterator` when `distributed_processing`
+        /// is on, and that iterator rebuilds an `ObjectInfo` from the path string it receives over
+        /// `ClusterFunctionReadTaskCallback`. A unit that is not identified by a path does not
+        /// survive that round trip, so fail close instead of reading something else.
+        if (distributed_processing)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Distributed processing is not implemented for the `{}` read unit kind",
+                SettingFieldReadUnitKindTraits::toString(read_unit_kind));
+
+        /// `_headers` are the HTTP response headers of the data `GET`, read from the source's
+        /// `ReadBuffer`. A unit that opens itself has no such buffer, and the fallback in
+        /// `StorageObjectStorageSource::generate` would report the metadata-probe attributes (usually
+        /// from a `HEAD`) as if they were the `GET` headers — a silently wrong answer. Reject it here
+        /// rather than returning the wrong value.
+        if (info.requested_virtual_columns.contains("_headers"))
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "The `_headers` virtual column is not implemented for the `{}` read unit kind",
+                SettingFieldReadUnitKindTraits::toString(read_unit_kind));
+
+        unit_opener = configuration->resolveReadUnitOpener(
+            format_settings, parser_shared_resources, format_filter_info, context);
+
+        if (!unit_opener)
+            throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                "Table engine {} does not implement the `{}` read unit kind",
+                configuration->getEngineName(),
+                SettingFieldReadUnitKindTraits::toString(read_unit_kind));
+    }
+
     /// `max_num_streams` is a read-parallelism request, not a thread budget.
     const size_t resize_to = std::min(max_num_streams, build_settings.max_threads);
 
@@ -156,10 +200,31 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
     }
     else
     {
-        Pipes pipes;
-        for (size_t i = 0; i < num_streams; ++i)
+        /// The read unit kind picks the source class, here, once, rather than being a condition the
+        /// shared read path re-evaluates for every unit. `SelfOpeningObjectStorageSource` inherits
+        /// everything but `createReader` from `StorageObjectStorageSource`, so the two are the same
+        /// read with one step done differently.
+        auto make_source = [&]() -> std::shared_ptr<StorageObjectStorageSource>
         {
-            auto source = std::make_shared<StorageObjectStorageSource>(
+            if (unit_opener)
+                return std::make_shared<SelfOpeningObjectStorageSource>(
+                    unit_opener,
+                    storage_id,
+                    getName(),
+                    object_storage,
+                    configuration,
+                    storage_snapshot,
+                    info,
+                    format_settings,
+                    context,
+                    max_block_size,
+                    iterator_wrapper,
+                    parser_shared_resources,
+                    format_filter_info,
+                    need_only_count,
+                    lazy_row_index_registry);
+
+            return std::make_shared<StorageObjectStorageSource>(
                 storage_id,
                 getName(),
                 object_storage,
@@ -174,9 +239,11 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
                 format_filter_info,
                 need_only_count,
                 lazy_row_index_registry);
+        };
 
-            pipes.emplace_back(std::move(source));
-        }
+        Pipes pipes;
+        for (size_t i = 0; i < num_streams; ++i)
+            pipes.emplace_back(make_source());
         pipe = Pipe::unitePipes(std::move(pipes));
     }
 
@@ -187,8 +254,13 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
 
     size_t output_ports = pipe.numOutputPorts();
     const bool parallelize_output = context->getSettingsRef()[Setting::parallelize_output_from_storages];
+    /// The format question only makes sense for a unit that is decoded by an input format;
+    /// `configuration->format` does not take part in reading a unit that opens itself, so asking
+    /// whether that format is safe to parallelize after reading would be the wrong question.
+    const bool format_allows_parallelize_output = read_unit_kind != ReadUnitKind::FormatFile
+        || FormatFactory::instance().checkParallelizeOutputAfterReading(configuration->format, context);
     if (parallelize_output
-        && FormatFactory::instance().checkParallelizeOutputAfterReading(configuration->format, context)
+        && format_allows_parallelize_output
         && output_ports > 0 && output_ports < resize_to)
         pipe.resize(resize_to);
 
@@ -238,6 +310,12 @@ bool ReadFromObjectStorageStep::canUseLazyMaterialization() const
     /// Data lakes can have per-file formats, deletes, and schema evolution; the configuration
     /// proves against the concrete data snapshot that every file can take the lazy path.
     if (!configuration->supportsLazyMaterialization(storage_snapshot->metadata, getContext()))
+        return false;
+
+    /// The lazy pass builds its own `StorageObjectStorageSource` (see `LazyReadFromObjectStorageSource`)
+    /// without a `ReadUnitOpener`, so it would reread the units as plain data files. For a unit that is
+    /// not a format-readable file that is not a slower answer, it is a different one.
+    if (configuration->getReadUnitKind(getContext()) != ReadUnitKind::FormatFile)
         return false;
 
     /// The lazy pass rereads the surviving files and must prove it sees the same generation of

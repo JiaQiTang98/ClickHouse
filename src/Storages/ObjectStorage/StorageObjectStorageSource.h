@@ -21,7 +21,11 @@ class SchemaCache;
 struct LazyObjectStorageFileRegistry;
 using LazyObjectStorageFileRegistryPtr = std::shared_ptr<LazyObjectStorageFileRegistry>;
 
-class StorageObjectStorageSource final : public ISource
+/// Reads the read units handed out by an `IObjectIterator`: opens one unit, drains it, and fills in
+/// the columns that do not come from the unit itself (hive partition, virtual, row lineage). Only
+/// how a unit is *opened* varies between table engines, which is the single `virtual createReader`
+/// below - see `SelfOpeningObjectStorageSource` for the other kind. Not `final` for that reason.
+class StorageObjectStorageSource : public ISource
 {
     friend class ObjectStorageQueueSource;
 
@@ -51,9 +55,13 @@ public:
 
     String getName() const override { return name; }
 
-    Chunk generate() override;
+    /// `final` on the members rather than on the class: a subclass replaces how one read unit is
+    /// opened (`createReader`), never how units are drained and their surrounding columns filled in.
+    /// The class itself cannot be `final` because of that one virtual, but these two must not be
+    /// overridden - and marking them keeps whatever the class-level `final` gave the compiler here.
+    Chunk generate() final;
 
-    void onFinish() override;
+    void onFinish() final;
 
     static std::shared_ptr<IObjectIterator> createFileIterator(
         StorageObjectStorageConfigurationPtr configuration,
@@ -161,9 +169,30 @@ protected:
         FormatFilterInfoPtr format_filter_info,
         bool need_only_count);
 
-    ReaderHolder createReader();
+    /// Open the next read unit of this source. The one thing a table engine whose read unit is not a
+    /// format-readable file has to replace; everything else about the read - `generate`, the column
+    /// filling, the prefetch of the next unit, progress, cancellation - is shared.
+    virtual ReaderHolder createReader();
 
     std::future<ReaderHolder> createReaderAsync();
+
+    /// Apply the row-level security filter and `PREWHERE` that were stripped from the reader as
+    /// `FilterTransform`s. Shared with `SelfOpeningObjectStorageSource`, which strips both
+    /// unconditionally. The order of the two matters, see the definition.
+    static void addStrippedFilterTransforms(
+        QueryPipelineBuilder & builder,
+        const FilterDAGInfoPtr & stripped_row_level_filter,
+        const PrewhereInfoPtr & stripped_prewhere_info);
+
+    /// Extract the requested columns and wrap the built pipeline into a `ReaderHolder`. This is the
+    /// tail every `createReader` ends with, whatever produced the rows.
+    static ReaderHolder finishReader(
+        QueryPipelineBuilder builder,
+        ObjectInfoPtr object_info,
+        std::unique_ptr<ReadBuffer> read_buf,
+        std::shared_ptr<ISource> source,
+        const Names & row_lineage_columns,
+        const ReadFromFormatInfo & read_from_format_info);
 
     void addNumRowsToCache(const ObjectInfo & object_info, size_t num_rows);
     void lazyInitialize();

@@ -70,6 +70,7 @@ namespace DataLakeStorageSetting
     extern DataLakeStorageSettingsString storage_auth_header;
     extern DataLakeStorageSettingsString storage_oauth_server_uri;
     extern DataLakeStorageSettingsBool storage_oauth_server_use_request_body;
+    extern DataLakeStorageSettingsReadUnitKind read_unit_kind;
 }
 
 struct FormatParserSharedResources;
@@ -398,6 +399,20 @@ public:
     std::optional<Pipe> buildReadPipe(const ObjectStorageReadPipelineParams & params, ContextPtr local_context) const override
     {
         return getMetadata()->buildReadPipe(params, local_context);
+    }
+
+    ReadUnitKind getReadUnitKind(ContextPtr) const override
+    {
+        return (*settings)[DataLakeStorageSetting::read_unit_kind];
+    }
+
+    ReadUnitOpener resolveReadUnitOpener(
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        FormatFilterInfoPtr format_filter_info,
+        ContextPtr local_context) const override
+    {
+        return getMetadata()->resolveReadUnitOpener(format_settings, parser_shared_resources, format_filter_info, local_context);
     }
 
     void fromDisk(const String & disk_name, ASTs & args, ContextPtr context, bool with_structure) override

@@ -1613,69 +1613,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
             });
         }
 
-        /// Apply row-level security filter and `PREWHERE` as fallback `FilterTransform`s
-        /// when the file format doesn't support `PREWHERE`. For mixed-format data lake
-        /// tables (e.g. Iceberg with Parquet + ORC files), table-level `PREWHERE` support
-        /// may not match the individual file's format. We strip `row_level_filter` and
-        /// `prewhere_info` from `FormatFilterInfo` above and apply them here as post-read
-        /// filters instead.
-        ///
-        /// These transforms run AFTER the schema_transform `ExpressionTransform` above so
-        /// that the block they see uses query-side column names. The data lake schema
-        /// transform handles Iceberg / Delta column renames, type evolution, and
-        /// constant-default columns added by schema evolution; running the filters
-        /// downstream of it means policy and `PREWHERE` expressions evaluate against
-        /// the exact names produced by the query planner. (Running them upstream would
-        /// fail with `NOT_FOUND_COLUMN_IN_BLOCK` in the schema-changed path because the
-        /// reader emits file-side names, while filter expressions reference query-side
-        /// names.)
-        ///
-        /// Order between the two filters matters: row-level filter first, `PREWHERE`
-        /// second. This mirrors the canonical filter pipeline used everywhere else in
-        /// the engine:
-        ///   - `SourceStepWithFilter::applyPrewhereActions`
-        ///   - `MergeTreeSelectProcessor::getPrewhereActions`
-        ///   - `Parquet::Reader::initializePrewhere`
-        /// `PREWHERE` actions drop their input columns from the block via `updateHeader`
-        /// (the DAG outputs the synthetic filter column plus only what is needed
-        /// downstream). If `PREWHERE` ran first, a row-policy expression that references
-        /// the same input column (a common case: row policy on `c0`, query
-        /// `SELECT c1 FROM t PREWHERE c0 > N`) could not be evaluated. Applying the
-        /// row-level filter first preserves the input columns for the policy and then
-        /// lets `PREWHERE` drop them as the planner intended.
-        ///
-        /// The query planner puts row policies into `row_level_filter` when
-        /// `storage->supportsPrewhere()` (`PlannerJoinTree.cpp:1012`), but individual
-        /// files in mixed-format tables may not support it at format level.
-        /// `update_row_numbers_info = true`: safe here because every transform between the format
-        /// reader (which attaches `ChunkInfoRowNumbers`) and these filters preserves or maintains it.
-        if (stripped_row_level_filter)
-        {
-            auto row_level_actions = std::make_shared<ExpressionActions>(stripped_row_level_filter->actions.clone());
-            builder.addSimpleTransform([&](const SharedHeader & header)
-            {
-                return std::make_shared<FilterTransform>(
-                    header, row_level_actions,
-                    stripped_row_level_filter->column_name,
-                    stripped_row_level_filter->do_remove_column,
-                    /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
-                    /*update_row_numbers_info=*/true);
-            });
-        }
-
-        if (stripped_prewhere_info)
-        {
-            auto prewhere_actions = std::make_shared<ExpressionActions>(stripped_prewhere_info->prewhere_actions.clone());
-            builder.addSimpleTransform([&](const SharedHeader & header)
-            {
-                return std::make_shared<FilterTransform>(
-                    header, prewhere_actions,
-                    stripped_prewhere_info->prewhere_column_name,
-                    stripped_prewhere_info->remove_prewhere_column,
-                    /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
-                    /*update_row_numbers_info=*/true);
-            });
-        }
+        addStrippedFilterTransforms(builder, stripped_row_level_filter, stripped_prewhere_info);
 
         if (read_from_format_info.columns_description.hasDefaults())
         {
@@ -1689,6 +1627,83 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         source = input_format;
     }
 
+    return finishReader(
+        std::move(builder), object_info, std::move(read_buf), std::move(source), row_lineage_columns, read_from_format_info);
+}
+
+/// Apply row-level security filter and `PREWHERE` as fallback `FilterTransform`s when the reader
+/// does not support `PREWHERE`. For mixed-format data lake tables (e.g. Iceberg with Parquet + ORC
+/// files), table-level `PREWHERE` support may not match the individual file's format capabilities;
+/// a self-opening read unit never supports it. `row_level_filter` and `prewhere_info` are stripped
+/// from `FormatFilterInfo` by the caller and applied here as post-read filters instead.
+///
+/// These transforms run AFTER the schema_transform `ExpressionTransform` so that the block they see
+/// uses query-side column names. The data lake schema transform handles Iceberg / Delta column
+/// renames, type evolution, and constant-default columns added by schema evolution; running the
+/// filters downstream of it means policy and `PREWHERE` expressions evaluate against the exact
+/// names produced by the query planner. (Running them upstream would fail with
+/// `NOT_FOUND_COLUMN_IN_BLOCK` in the schema-changed path because the reader emits file-side names,
+/// while filter expressions reference query-side names.)
+///
+/// Order between the two filters matters: row-level filter first, `PREWHERE` second. This mirrors
+/// the canonical filter pipeline used everywhere else in the engine:
+///   - `SourceStepWithFilter::applyPrewhereActions`
+///   - `MergeTreeSelectProcessor::getPrewhereActions`
+///   - `Parquet::Reader::initializePrewhere`
+/// `PREWHERE` actions drop their input columns from the block via `updateHeader` (the DAG outputs
+/// the synthetic filter column plus only what is needed downstream). If `PREWHERE` ran first, a
+/// row-policy expression that references the same input column (a common case: row policy on `c0`,
+/// query `SELECT c1 FROM t PREWHERE c0 > N`) could not be evaluated. Applying the row-level filter
+/// first preserves the input columns for the policy and then lets `PREWHERE` drop them as the
+/// planner intended.
+///
+/// The query planner puts row policies into `row_level_filter` when `storage->supportsPrewhere()`
+/// (`PlannerJoinTree.cpp:1012`), but individual files in mixed-format tables may not support it at
+/// format level.
+/// `update_row_numbers_info = true`: safe here because every transform between the format reader
+/// (which attaches `ChunkInfoRowNumbers`) and these filters preserves or maintains it.
+void StorageObjectStorageSource::addStrippedFilterTransforms(
+    QueryPipelineBuilder & builder,
+    const FilterDAGInfoPtr & stripped_row_level_filter,
+    const PrewhereInfoPtr & stripped_prewhere_info)
+{
+    if (stripped_row_level_filter)
+    {
+        auto row_level_actions = std::make_shared<ExpressionActions>(stripped_row_level_filter->actions.clone());
+        builder.addSimpleTransform([&](const SharedHeader & header)
+        {
+            return std::make_shared<FilterTransform>(
+                header, row_level_actions,
+                stripped_row_level_filter->column_name,
+                stripped_row_level_filter->do_remove_column,
+                /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
+                /*update_row_numbers_info=*/true);
+        });
+    }
+
+    if (stripped_prewhere_info)
+    {
+        auto prewhere_actions = std::make_shared<ExpressionActions>(stripped_prewhere_info->prewhere_actions.clone());
+        builder.addSimpleTransform([&](const SharedHeader & header)
+        {
+            return std::make_shared<FilterTransform>(
+                header, prewhere_actions,
+                stripped_prewhere_info->prewhere_column_name,
+                stripped_prewhere_info->remove_prewhere_column,
+                /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
+                /*update_row_numbers_info=*/true);
+        });
+    }
+}
+
+StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::finishReader(
+    QueryPipelineBuilder builder,
+    ObjectInfoPtr object_info,
+    std::unique_ptr<ReadBuffer> read_buf,
+    std::shared_ptr<ISource> source,
+    const Names & row_lineage_columns,
+    const ReadFromFormatInfo & read_from_format_info)
+{
     /// Add ExtractColumnsTransform to extract requested columns/subcolumns
     /// from chunk read by IInputFormat.
     NamesAndTypesList columns_to_extract = read_from_format_info.requested_columns;

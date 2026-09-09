@@ -4,6 +4,7 @@
 #include <Core/FormatFactorySettings.h>
 #include <Core/SettingsEnums.h>
 #include <Core/SettingsFields.h>
+#include <Storages/ObjectStorage/ReadUnitKind.h>
 #include <base/unit.h>
 
 #include <limits>
@@ -47,7 +48,8 @@ class SettingsChanges;
     M(CLASS_NAME, NonZeroUInt64) \
     M(CLASS_NAME, UInt64Auto) \
     M(CLASS_NAME, URI) \
-    M(CLASS_NAME, DatabaseDataLakeCatalogType)
+    M(CLASS_NAME, DatabaseDataLakeCatalogType) \
+    M(CLASS_NAME, ReadUnitKind)
 
 // clang-format off
 
@@ -143,6 +145,20 @@ Stored in the table definition, so it survives a server restart. Falls back to t
     DECLARE(UInt64, iceberg_data_file_size_upper_threshold_compaction, 10_GiB, R"(
 Per-table counterpart of the query-level setting of the same name: data files larger than this are selected for compaction.
 Stored in the table definition, so it survives a server restart. Falls back to the query-level setting when not set explicitly.
+)", 0) \
+    DECLARE(ReadUnitKind, read_unit_kind, ReadUnitKind::FormatFile, R"(
+How one unit of work in the read path is produced.
+
+- `format_file` — every read unit is one data file, opened with `FormatFactory` and decoded from a
+  `ReadBuffer`. This is what every table engine does, and the table engine's own semantics (deletes,
+  schema evolution) are applied by the transform chain the read path builds around the format reader.
+- `self_opening` — the read unit produces its rows itself, for a table engine whose unit is not a
+  format-readable file. The engine's semantics are already applied inside it, so the read path only
+  adds the virtual and hive partition columns around it.
+
+A table engine that does not implement the requested kind rejects the read instead of falling back to
+the other kind: reading the data files of a `self_opening` engine as plain files would ignore the
+engine's own semantics and silently return wrong rows.
 )", 0) \
     DECLARE(DatabaseDataLakeCatalogType, storage_catalog_type, DatabaseDataLakeCatalogType::NONE, "Catalog type", 0) \
     DECLARE(String, storage_catalog_credential, "", "", 0)             \

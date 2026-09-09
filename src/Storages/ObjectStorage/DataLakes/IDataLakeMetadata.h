@@ -14,6 +14,7 @@
 #include <Storages/IStorage_fwd.h>
 #include <Storages/ObjectStorage/DataLakes/DataLakeTableStateSnapshot.h>
 #include <Storages/ObjectStorage/ObjectStorageReadPipelineParams.h>
+#include <Storages/ObjectStorage/ReadUnitKind.h>
 #include <Storages/MutationCommands.h>
 #include <Storages/prepareReadingFromFormat.h>
 #include <Disks/DiskType.h>
@@ -163,6 +164,14 @@ public:
     virtual void checkMutationIsPossible(const MutationCommands & /*commands*/) { throwNotImplemented("mutations"); }
 
     virtual void addDeleteTransformers(ObjectInfoPtr, QueryPipelineBuilder &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const { }
+
+    /// Resolve how this data lake opens one `ReadUnitKind::SelfOpening` read unit. See
+    /// `StorageObjectStorageConfiguration::resolveReadUnitOpener` for the contract.
+    virtual ReadUnitOpener resolveReadUnitOpener(
+        const std::optional<FormatSettings> &,
+        FormatParserSharedResourcesPtr,
+        FormatFilterInfoPtr,
+        ContextPtr) const { return {}; }
 
     /// Build a read topology of this data lake's own instead of the generic one-source-per-stream
     /// read. See `StorageObjectStorageConfiguration::buildReadPipe` for the contract.

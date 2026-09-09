@@ -16,6 +16,7 @@
 #include <Formats/FormatFilterInfo.h>
 #include <Storages/ObjectStorage/DataLakes/IDataLakeMetadata.h>
 #include <Storages/ObjectStorage/ObjectStorageReadPipelineParams.h>
+#include <Storages/ObjectStorage/ReadUnitKind.h>
 #include <optional>
 #include <Databases/DataLake/StorageCredentials.h>
 #include <Storages/MergeTree/BackgroundJobsAssignee.h>
@@ -179,6 +180,27 @@ public:
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const;
 
+    /// How one unit of work in the read path of this table is produced. Answerable without looking at
+    /// any unit, and the same for the whole read, so `ReadFromObjectStorageStep::initializePipeline`
+    /// can compute it once and gate the plan on it.
+    virtual ReadUnitKind getReadUnitKind(ContextPtr) const { return ReadUnitKind::FormatFile; }
+
+    /// Resolve how this engine opens one `ReadUnitKind::SelfOpening` read unit. Called once per read,
+    /// at pipeline-build time, before any unit exists. Returns an empty function when this engine
+    /// cannot serve `SelfOpening` units at all, which the step reports as an error at plan time rather
+    /// than from a worker thread halfway through the read.
+    ///
+    /// The returned source must produce exactly the `header` it is given. `format_filter_info` may be
+    /// used to prune data but need not filter rows: the caller re-applies the filters unconditionally,
+    /// because for a lake SDK "accepting a predicate" usually means pruning files and row groups, not
+    /// guaranteeing that every row satisfies it. A unit that reads in parallel must take its threads
+    /// from `parser_shared_resources` rather than spawning a pool of its own.
+    virtual ReadUnitOpener resolveReadUnitOpener(
+        const std::optional<FormatSettings> &,
+        FormatParserSharedResourcesPtr,
+        FormatFilterInfoPtr,
+        ContextPtr) const { return {}; }
+
     /// Build the read topology for tables whose rows cannot be produced by independent per-file
     /// sources — for example merge-on-read tables, where the data files of one bucket only give
     /// the correct rows once merged together. Returns std::nullopt to use the generic
@@ -196,6 +218,13 @@ public:
     ///    so `supportsLazyMaterialization` has to be turned off along with it;
     ///  - consume `params.iterator` rather than listing the data files again, so that distributed
     ///    processing, archives and file progress reporting stay in one place.
+    ///
+    /// This is also where an implementation validates `getReadUnitKind` against what its data
+    /// actually requires, because it is the only per-engine plan-time hook the step calls
+    /// unconditionally. An engine whose units are not format-readable files must reject a read asking
+    /// for `ReadUnitKind::FormatFile` here — even if it does not change the topology and only returns
+    /// std::nullopt — since the generic read would then decode its data files as plain files, ignore
+    /// the engine's own semantics (deletion vectors, merge-on-read) and silently return wrong rows.
     virtual std::optional<Pipe> buildReadPipe(const ObjectStorageReadPipelineParams &, ContextPtr) const { return std::nullopt; }
 
     virtual ReadFromFormatInfo prepareReadingFromFormat(

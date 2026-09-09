@@ -1,0 +1,14 @@
+-- the default kind reads the data files with FormatFactory
+10	45
+-- an unknown value is rejected by the settings framework
+1
+-- self_opening is refused at plan time, naming the engine and the requested kind
+1
+-- distributed processing is refused with its own error
+1
+-- the setting also applies when stored in the table definition
+1
+1
+-- explicit format_file is identical to omitting the setting
+rows identical
+pipeline identical
