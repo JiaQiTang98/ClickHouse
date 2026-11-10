@@ -184,24 +184,16 @@ static NameSet getHeaderColumnsReadByDefault(
 }
 
 
-AddingDefaultsTransform::AddingDefaultsTransform(
-    SharedHeader header,
-    const ColumnsDescription & columns_,
-    IInputFormat & input_format_,
-    ContextPtr context_)
-    : ISimpleTransform(header, header, true)
-    , columns(columns_)
+ColumnDefaultsFiller::ColumnDefaultsFiller(const ColumnsDescription & columns_, ContextPtr context_)
+    : columns(columns_)
     , column_defaults(columns.getDefaults())
-    , input_format(input_format_)
     , context(context_)
 {
 }
 
 
-void AddingDefaultsTransform::onCancel() noexcept
+void ColumnDefaultsFiller::cancel() noexcept
 {
-    ISimpleTransform::onCancel();
-
     ExpressionActionsPtr actions;
     {
         std::lock_guard lock(current_actions_mutex);
@@ -219,17 +211,16 @@ void AddingDefaultsTransform::onCancel() noexcept
 }
 
 
-void AddingDefaultsTransform::transform(Chunk & chunk)
+void ColumnDefaultsFiller::fill(
+    Chunk & chunk, const Block & header, const BlockMissingValues & missing_values, const std::atomic<bool> & is_cancelled)
 {
     if (column_defaults.empty())
         return;
 
-    const auto * block_missing_values = input_format.getMissingValues();
     /// `BlockMissingValues::empty` is also true when the mask holds no columns at all, where the lookups below would be out of range.
-    if (!block_missing_values || block_missing_values->empty())
+    if (missing_values.empty())
         return;
 
-    const auto & header = getOutputPort().getHeader();
     size_t num_rows = chunk.getNumRows();
     auto res = header.cloneWithColumns(chunk.detachColumns());
 
@@ -240,7 +231,7 @@ void AddingDefaultsTransform::transform(Chunk & chunk)
         if (!res.has(col_name))
             continue;
         size_t column_idx = res.getPositionByName(col_name);
-        if (block_missing_values->hasDefaultBits(column_idx))
+        if (missing_values.hasDefaultBits(column_idx))
             columns_needing_defaults.emplace_back(col_name, column_idx);
     }
 
@@ -349,26 +340,26 @@ void AddingDefaultsTransform::transform(Chunk & chunk)
             /// skip the whole default evaluation instead of running one action of it. A cancellation
             /// landing after this check reaches the running function through the published actions,
             /// if it supports interruption.
-            if (isCancelled())
+            if (is_cancelled.load(std::memory_order_acquire))
             {
                 {
                     std::lock_guard lock(current_actions_mutex);
                     current_actions.reset();
                 }
-                chunk.setColumns(getOutputPort().getHeader().cloneEmptyColumns(), 0);
+                chunk.setColumns(header.cloneEmptyColumns(), 0);
                 return;
             }
 
-            actions->execute(evaluate_block, false, false, &getCancellationFlag());
+            actions->execute(evaluate_block, false, false, &is_cancelled);
 
             {
                 std::lock_guard lock(current_actions_mutex);
                 current_actions.reset();
             }
 
-            if (isCancelled())
+            if (is_cancelled.load(std::memory_order_acquire))
             {
-                chunk.setColumns(getOutputPort().getHeader().cloneEmptyColumns(), 0);
+                chunk.setColumns(header.cloneEmptyColumns(), 0);
                 return;
             }
         }
@@ -384,7 +375,7 @@ void AddingDefaultsTransform::transform(Chunk & chunk)
 
             const auto & column_def = evaluate_block.getByName(col_name);
             ColumnWithTypeAndName & column_read = res.getByPosition(col_idx);
-            const auto & defaults_mask = block_missing_values->getDefaultsBitmask(col_idx);
+            const auto & defaults_mask = missing_values.getDefaultsBitmask(col_idx);
 
             checkCalculated(column_read, column_def, defaults_mask.size());
 
@@ -424,6 +415,35 @@ void AddingDefaultsTransform::transform(Chunk & chunk)
     }
 
     chunk.setColumns(res.getColumns(), num_rows);
+}
+
+
+AddingDefaultsTransform::AddingDefaultsTransform(
+    SharedHeader header,
+    const ColumnsDescription & columns_,
+    IInputFormat & input_format_,
+    ContextPtr context_)
+    : ISimpleTransform(header, header, true)
+    , filler(columns_, context_)
+    , input_format(input_format_)
+{
+}
+
+
+void AddingDefaultsTransform::onCancel() noexcept
+{
+    ISimpleTransform::onCancel();
+    filler.cancel();
+}
+
+
+void AddingDefaultsTransform::transform(Chunk & chunk)
+{
+    const auto * block_missing_values = input_format.getMissingValues();
+    if (!block_missing_values)
+        return;
+
+    filler.fill(chunk, getOutputPort().getHeader(), *block_missing_values, getCancellationFlag());
 }
 
 }

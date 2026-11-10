@@ -550,13 +550,7 @@ void FilterTransform::transform(Chunk & chunk)
         *rows_filtered += chunk_rows_before - chunk.getNumRows();
 }
 
-namespace
-{
-
-/// Compose `filter` (a dense mask over this chunk's pre-filter rows) into the chunk's
-/// `ChunkInfoRowNumbers.applied_filter`, mirroring `DeletionVectorTransform`, so physical row
-/// numbers survive filtering. No-op when the chunk carries no such info.
-void updateRowNumbersInfo(const Chunk & chunk, const IColumn::Filter & filter)
+void FilterTransform::updateRowNumbersInfo(const Chunk & chunk, const IColumnFilter & filter)
 {
     auto row_numbers_info = chunk.getChunkInfos().get<ChunkInfoRowNumbers>();
     if (!row_numbers_info)
@@ -591,6 +585,9 @@ void updateRowNumbersInfo(const Chunk & chunk, const IColumn::Filter & filter)
         applied_filter->assign(filter);
     }
 }
+
+namespace
+{
 
 /// After this filter removes some rows, the rows of the chunk are no longer at the positions given by
 /// `MarkRangesInfo::rows_per_mark`, e.g. for the next filter of a split `AND` chain (`FilterStep`).

@@ -55,6 +55,11 @@ public:
 
     static bool canUseType(const DataTypePtr & type);
 
+    /// Compose `filter` (a dense mask over this chunk's pre-filter rows) into the chunk's
+    /// `ChunkInfoRowNumbers.applied_filter`, mirroring `DeletionVectorTransform`, so physical row
+    /// numbers survive filtering. No-op when the chunk carries no such info.
+    static void updateRowNumbersInfo(const Chunk & chunk, const IColumnFilter & filter);
+
 private:
     ExpressionActionsPtr expression;
     SetSpillables set_spillables;
