@@ -84,6 +84,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/ManifestListPruning.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Mutations.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/PositionDeleteTransform.h>
+#include <Storages/ObjectStorage/ReadUnitTransforms.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Snapshot.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/StatelessMetadataFileGetter.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/Utils.h>
@@ -1873,6 +1874,126 @@ void IcebergMetadata::modifyFormatSettings(FormatSettings & format_settings, con
         format_settings.parquet.preserve_order = true;
 }
 
+EqualityDeleteFilter IcebergMetadata::makeEqualityDeleteFilter(
+    const IcebergDataObjectInfo & iceberg_object_info,
+    const EqualityDeleteObject & delete_file,
+    const SharedHeader & header,
+    const std::optional<FormatSettings> & format_settings,
+    FormatParserSharedResourcesPtr parser_shared_resources,
+    ContextPtr local_context) const
+{
+    /// get header of delete file
+    Block delete_file_header;
+    RelativePathWithMetadata delete_file_object(delete_file.file_path);
+    /// Equality deletes may be Parquet/ORC/Avro; only the ones that will actually seek to a
+    /// footer at the tail should skip the generic from-start prefetch.
+    auto read_settings = local_context->getReadSettings();
+    read_settings.remote_fs_settings.random_access
+        = FormatFactory::instance().checkIfFormatIsRandomAccessInput(delete_file.file_format, local_context);
+    {
+        auto schema_read_buffer = createReadBuffer(delete_file_object, object_storage, local_context, log, read_settings);
+        auto schema_reader = FormatFactory::instance().getSchemaReader(delete_file.file_format, *schema_read_buffer, local_context);
+        auto columns_with_names = schema_reader->readSchema();
+        ColumnsWithTypeAndName initial_header_data;
+        for (const auto & elem : columns_with_names)
+        {
+            initial_header_data.push_back(ColumnWithTypeAndName(elem.type, elem.name));
+        }
+        delete_file_header = Block(initial_header_data);
+    }
+    /// with equality ids, we can know which columns should be deleted, here we calculate the indexes.
+    const std::vector<Int32> & equality_ids = *(delete_file.equality_ids);
+    /// Iceberg `time` keys are read as the stored microseconds, like the data columns.
+    ColumnMapperPtr delete_mapper = persistent_components.schema_processor->getColumnMapperById(delete_file.schema_id);
+    bool has_time_equality_column = false;
+    Block block_for_set;
+    std::vector<size_t> equality_indexes_delete_file;
+    for (Int32 col_id : equality_ids)
+    {
+        NameAndTypePair name_and_type
+            = persistent_components.schema_processor->getFieldCharacteristics(delete_file.schema_id, col_id);
+        size_t position_in_delete_file = delete_file_header.getPositionByName(name_and_type.name);
+        if (delete_mapper && delete_mapper->isIcebergTimeFieldId(col_id))
+        {
+            auto & column = delete_file_header.getByPosition(position_in_delete_file);
+            DataTypePtr key_type = removeNullable(name_and_type.type);
+            column.type = column.type->isNullable() ? makeNullable(key_type) : key_type;
+            has_time_equality_column = true;
+        }
+        /// Take the type from the delete file header rather than from the table schema:
+        /// the nullability of a column in the delete file may differ from its nullability
+        /// in the table schema, and the columns read below have exactly the header's types.
+        block_for_set.insert(ColumnWithTypeAndName(delete_file_header.getByPosition(position_in_delete_file).type, name_and_type.name));
+        equality_indexes_delete_file.push_back(position_in_delete_file);
+    }
+    /// Then we read the content of the delete file.
+    auto mutable_columns_for_set = block_for_set.cloneEmptyColumns();
+    std::unique_ptr<ReadBuffer> data_read_buffer = createReadBuffer(delete_file_object, object_storage, local_context, log, read_settings);
+    CompressionMethod compression_method = chooseCompressionMethod(delete_file.file_path, "auto");
+    auto delete_format = FormatFactory::instance().getInput(
+        delete_file.file_format,
+        *data_read_buffer,
+        delete_file_header,
+        local_context,
+        local_context->getSettingsRef()[DB::Setting::max_block_size],
+        format_settings,
+        parser_shared_resources,
+        has_time_equality_column
+            ? std::make_shared<FormatFilterInfo>(nullptr, local_context, delete_mapper, nullptr, nullptr)
+            : nullptr,
+        true,
+        compression_method);
+    /// only get the delete columns and construct a set by 'block_for_set'
+    while (true)
+    {
+        Chunk delete_chunk = delete_format->read();
+        if (!delete_chunk)
+            break;
+        size_t rows = delete_chunk.getNumRows();
+        Columns delete_columns = delete_chunk.detachColumns();
+        for (size_t i = 0; i < equality_indexes_delete_file.size(); i++)
+        {
+            mutable_columns_for_set[i]->insertRangeFrom(*delete_columns[equality_indexes_delete_file[i]], 0, rows);
+        }
+    }
+    block_for_set.setColumns(std::move(mutable_columns_for_set));
+    /// we are constructing a 'not in' expression
+    const auto & settings = local_context->getSettingsRef();
+    SizeLimits size_limits_for_set
+        = {settings[Setting::max_rows_in_set], settings[Setting::max_bytes_in_set], settings[Setting::set_overflow_mode]};
+    FutureSetPtr future_set = std::make_shared<FutureSetFromTuple>(
+        CityHash_v1_0_2::uint128(), nullptr, block_for_set.getColumnsWithTypeAndName(), true, size_limits_for_set);
+    ColumnConst::Ptr set_col = ColumnConst::create(ColumnSet::create(1, future_set), 0);
+    ActionsDAG dag(header->getColumnsWithTypeAndName());
+    /// Construct right argument of 'not in' expression, it is the column set.
+    const ActionsDAG::Node * in_rhs_arg = &dag.addColumn(std::move(set_col), std::make_shared<DataTypeSet>(), "set column");
+    /// Construct left argument of 'not in' expression
+    ActionsDAG::NodeRawConstPtrs left_columns;
+    std::unordered_map<std::string_view, const ActionsDAG::Node *> outputs;
+    for (const auto & output : dag.getOutputs())
+        outputs.emplace(output->result_name, output);
+    /// select columns to use in 'notIn' function
+    for (Int32 col_id : equality_ids)
+    {
+        NameAndTypePair name_and_type = persistent_components.schema_processor->getFieldCharacteristics(
+            iceberg_object_info.info.underlying_format_read_schema_id, col_id);
+        auto it = outputs.find(name_and_type.name);
+        if (it == outputs.end())
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot find column {} in dag outputs", name_and_type.name);
+        left_columns.push_back(it->second);
+    }
+    FunctionOverloadResolverPtr func_tuple_builder
+        = std::make_unique<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionTuple>());
+    const ActionsDAG::Node * in_lhs_arg
+        = left_columns.size() == 1 ? left_columns.front() : &dag.addFunction(func_tuple_builder, std::move(left_columns), {});
+    /// we got the NOT IN function
+    auto func_not_in = FunctionFactory::instance().get("notIn", nullptr);
+    const auto & not_in_node = dag.addFunction(func_not_in, {in_lhs_arg, in_rhs_arg}, "notInResult");
+    dag.getOutputs().push_back(&not_in_node);
+    LOG_DEBUG(log, "Use expression {} in equality deletes", dag.dumpDAG());
+    return {std::make_shared<ExpressionActions>(std::move(dag)), "notInResult"};
+}
+
 void IcebergMetadata::addDeleteTransformers(
     ObjectInfoPtr object_info,
     QueryPipelineBuilder & builder,
@@ -1894,129 +2015,61 @@ void IcebergMetadata::addDeleteTransformers(
     LOG_DEBUG(log, "Constructing filter transform for equality delete, there are {} delete files", delete_files.size());
     for (const EqualityDeleteObject & delete_file : delete_files)
     {
-        auto simple_transform_adder = [&](const SharedHeader & header)
+        builder.addSimpleTransform([&](const SharedHeader & header)
         {
-            /// get header of delete file
-            Block delete_file_header;
-            RelativePathWithMetadata delete_file_object(delete_file.file_path);
-            /// Equality deletes may be Parquet/ORC/Avro; only the ones that will actually seek to a
-            /// footer at the tail should skip the generic from-start prefetch.
-            auto read_settings = local_context->getReadSettings();
-            read_settings.remote_fs_settings.random_access
-                = FormatFactory::instance().checkIfFormatIsRandomAccessInput(delete_file.file_format, local_context);
-            {
-                auto schema_read_buffer = createReadBuffer(delete_file_object, object_storage, local_context, log, read_settings);
-                auto schema_reader = FormatFactory::instance().getSchemaReader(delete_file.file_format, *schema_read_buffer, local_context);
-                auto columns_with_names = schema_reader->readSchema();
-                ColumnsWithTypeAndName initial_header_data;
-                for (const auto & elem : columns_with_names)
-                {
-                    initial_header_data.push_back(ColumnWithTypeAndName(elem.type, elem.name));
-                }
-                delete_file_header = Block(initial_header_data);
-            }
-            /// with equality ids, we can know which columns should be deleted, here we calculate the indexes.
-            const std::vector<Int32> & equality_ids = *(delete_file.equality_ids);
-            /// Iceberg `time` keys are read as the stored microseconds, like the data columns.
-            ColumnMapperPtr delete_mapper = persistent_components.schema_processor->getColumnMapperById(delete_file.schema_id);
-            bool has_time_equality_column = false;
-            Block block_for_set;
-            std::vector<size_t> equality_indexes_delete_file;
-            for (Int32 col_id : equality_ids)
-            {
-                NameAndTypePair name_and_type
-                    = persistent_components.schema_processor->getFieldCharacteristics(delete_file.schema_id, col_id);
-                size_t position_in_delete_file = delete_file_header.getPositionByName(name_and_type.name);
-                if (delete_mapper && delete_mapper->isIcebergTimeFieldId(col_id))
-                {
-                    auto & column = delete_file_header.getByPosition(position_in_delete_file);
-                    DataTypePtr key_type = removeNullable(name_and_type.type);
-                    column.type = column.type->isNullable() ? makeNullable(key_type) : key_type;
-                    has_time_equality_column = true;
-                }
-                /// Take the type from the delete file header rather than from the table schema:
-                /// the nullability of a column in the delete file may differ from its nullability
-                /// in the table schema, and the columns read below have exactly the header's types.
-                block_for_set.insert(ColumnWithTypeAndName(delete_file_header.getByPosition(position_in_delete_file).type, name_and_type.name));
-                equality_indexes_delete_file.push_back(position_in_delete_file);
-            }
-            /// Then we read the content of the delete file.
-            auto mutable_columns_for_set = block_for_set.cloneEmptyColumns();
-            std::unique_ptr<ReadBuffer> data_read_buffer = createReadBuffer(delete_file_object, object_storage, local_context, log, read_settings);
-            CompressionMethod compression_method = chooseCompressionMethod(delete_file.file_path, "auto");
-            auto delete_format = FormatFactory::instance().getInput(
-                delete_file.file_format,
-                *data_read_buffer,
-                delete_file_header,
-                local_context,
-                local_context->getSettingsRef()[DB::Setting::max_block_size],
-                format_settings,
-                parser_shared_resources,
-                has_time_equality_column
-                    ? std::make_shared<FormatFilterInfo>(nullptr, local_context, delete_mapper, nullptr, nullptr)
-                    : nullptr,
-                true,
-                compression_method);
-            /// only get the delete columns and construct a set by 'block_for_set'
-            while (true)
-            {
-                Chunk delete_chunk = delete_format->read();
-                if (!delete_chunk)
-                    break;
-                size_t rows = delete_chunk.getNumRows();
-                Columns delete_columns = delete_chunk.detachColumns();
-                for (size_t i = 0; i < equality_indexes_delete_file.size(); i++)
-                {
-                    mutable_columns_for_set[i]->insertRangeFrom(*delete_columns[equality_indexes_delete_file[i]], 0, rows);
-                }
-            }
-            block_for_set.setColumns(std::move(mutable_columns_for_set));
-            /// we are constructing a 'not in' expression
-            const auto & settings = local_context->getSettingsRef();
-            SizeLimits size_limits_for_set
-                = {settings[Setting::max_rows_in_set], settings[Setting::max_bytes_in_set], settings[Setting::set_overflow_mode]};
-            FutureSetPtr future_set = std::make_shared<FutureSetFromTuple>(
-                CityHash_v1_0_2::uint128(), nullptr, block_for_set.getColumnsWithTypeAndName(), true, size_limits_for_set);
-            ColumnConst::Ptr set_col = ColumnConst::create(ColumnSet::create(1, future_set), 0);
-            ActionsDAG dag(header->getColumnsWithTypeAndName());
-            /// Construct right argument of 'not in' expression, it is the column set.
-            const ActionsDAG::Node * in_rhs_arg = &dag.addColumn(std::move(set_col), std::make_shared<DataTypeSet>(), "set column");
-            /// Construct left argument of 'not in' expression
-            ActionsDAG::NodeRawConstPtrs left_columns;
-            std::unordered_map<std::string_view, const ActionsDAG::Node *> outputs;
-            for (const auto & output : dag.getOutputs())
-                outputs.emplace(output->result_name, output);
-            /// select columns to use in 'notIn' function
-            for (Int32 col_id : equality_ids)
-            {
-                NameAndTypePair name_and_type = persistent_components.schema_processor->getFieldCharacteristics(
-                    iceberg_object_info->info.underlying_format_read_schema_id, col_id);
-                auto it = outputs.find(name_and_type.name);
-                if (it == outputs.end())
-                    throw Exception(ErrorCodes::LOGICAL_ERROR, "Cannot find column {} in dag outputs", name_and_type.name);
-                left_columns.push_back(it->second);
-            }
-            FunctionOverloadResolverPtr func_tuple_builder
-                = std::make_unique<FunctionToOverloadResolverAdaptor>(std::make_shared<FunctionTuple>());
-            const ActionsDAG::Node * in_lhs_arg
-                = left_columns.size() == 1 ? left_columns.front() : &dag.addFunction(func_tuple_builder, std::move(left_columns), {});
-            /// we got the NOT IN function
-            auto func_not_in = FunctionFactory::instance().get("notIn", nullptr);
-            const auto & not_in_node = dag.addFunction(func_not_in, {in_lhs_arg, in_rhs_arg}, "notInResult");
-            dag.getOutputs().push_back(&not_in_node);
-            LOG_DEBUG(log, "Use expression {} in equality deletes", dag.dumpDAG());
+            auto filter = makeEqualityDeleteFilter(*iceberg_object_info, delete_file, header, format_settings, parser_shared_resources, local_context);
             /// update_row_numbers_info = true: every transform that can precede this one (the
             /// position-delete transform, an earlier equality-delete filter) maintains
             /// `ChunkInfoRowNumbers`, so it still describes the chunk here. Keeping the physical row
             /// numbers consistent after rows are removed is what makes the `_row_number` virtual
             /// column and lazy materialization correct on top of equality deletes.
             return std::make_shared<FilterTransform>(
-                header, std::make_shared<ExpressionActions>(std::move(dag)), "notInResult", true,
+                header, std::move(filter.actions), filter.filter_column_name, true,
                 /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
                 /*update_row_numbers_info=*/true);
-        };
-        builder.addSimpleTransform(simple_transform_adder);
+        });
     }
+}
+
+void IcebergMetadata::addReadUnitTransforms(
+    Pipe & pipe,
+    const std::optional<FormatSettings> & format_settings,
+    FormatParserSharedResourcesPtr parser_shared_resources,
+    ContextPtr local_context) const
+{
+    /// The transform may outlive the metadata, so it must not refer to it.
+    pipe.addSimpleTransform([&](const SharedHeader & header)
+    {
+        return std::make_shared<ReadUnitSwitchingTransform>(
+            header,
+            "ReadUnitIcebergPositionDeleteTransform",
+            [object_storage_ = object_storage, format_settings, parser_shared_resources, local_context](
+                const ReadUnitContext & unit, const SharedHeader & unit_header) -> std::shared_ptr<ISimpleTransform>
+            {
+                auto iceberg_object_info = std::dynamic_pointer_cast<IcebergDataObjectInfo>(unit.object_info);
+                if (!iceberg_object_info || !iceberg_object_info->info.hasPositionDeletes())
+                    return nullptr;
+                return iceberg_object_info->getPositionDeleteTransformer(
+                    object_storage_, unit_header, format_settings, parser_shared_resources, local_context);
+            });
+    });
+}
+
+std::vector<EqualityDeleteFilter> IcebergMetadata::getEqualityDeleteFilters(
+    ObjectInfoPtr object_info,
+    const SharedHeader & header,
+    const std::optional<FormatSettings> & format_settings,
+    FormatParserSharedResourcesPtr parser_shared_resources,
+    ContextPtr local_context) const
+{
+    auto iceberg_object_info = std::dynamic_pointer_cast<IcebergDataObjectInfo>(object_info);
+    if (!iceberg_object_info)
+        return {};
+
+    std::vector<EqualityDeleteFilter> filters;
+    for (const EqualityDeleteObject & delete_file : iceberg_object_info->info.equality_deletes_objects)
+        filters.push_back(makeEqualityDeleteFilter(*iceberg_object_info, delete_file, header, format_settings, parser_shared_resources, local_context));
+    return filters;
 }
 
 SinkToStoragePtr IcebergMetadata::write(

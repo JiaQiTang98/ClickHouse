@@ -3,6 +3,7 @@
 #include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Core/Settings.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
+#include <Storages/ObjectStorage/ReadUnitTransforms.h>
 #include <Interpreters/ActionsDAG.h>
 #include <Processors/Sources/NullSource.h>
 #include <Processors/QueryPlan/Serialization.h>
@@ -33,6 +34,10 @@
 #include <IO/S3/Client.h>
 #endif
 
+#if USE_PARQUET
+#include <Storages/ObjectStorage/DataLakes/DeltaLakeMetadata.h>
+#endif
+
 
 namespace DB
 {
@@ -44,6 +49,7 @@ namespace Setting
     extern const SettingsBool azure_validate_etag_on_read;
     extern const SettingsBool use_query_condition_cache;
     extern const SettingsBool use_query_condition_cache_for_top_k;
+    extern const SettingsBool object_storage_flat_read_pipeline;
 }
 
 namespace DataLakeStorageSetting
@@ -205,6 +211,8 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
         format_filter_info->top_k_filter = std::move(top_k_filter_tracking_best_values);
     }
 
+    const auto flat_read_pipeline = makeFlatReadPipelineDescription(context, parser_shared_resources);
+
     for (size_t i = 0; i < num_streams; ++i)
     {
         auto source = std::make_shared<StorageObjectStorageSource>(
@@ -222,13 +230,16 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
             format_filter_info,
             need_only_count,
             lazy_row_index_registry,
-            top_k_query_condition_cache_key);
+            top_k_query_condition_cache_key,
+            flat_read_pipeline);
 
         pipes.emplace_back(std::move(source));
     }
     auto pipe = Pipe::unitePipes(std::move(pipes));
     if (pipe.empty())
         pipe = Pipe(std::make_shared<NullSource>(std::make_shared<const Block>(info.source_header)));
+    else if (flat_read_pipeline)
+        addReadUnitTransforms(pipe, flat_read_pipeline);
 
     size_t output_ports = pipe.numOutputPorts();
     const bool parallelize_output = context->getSettingsRef()[Setting::parallelize_output_from_storages];
@@ -247,6 +258,125 @@ void ReadFromObjectStorageStep::initializePipeline(QueryPipelineBuilder & pipeli
         processors.emplace_back(processor);
 
     pipeline.init(std::move(pipe));
+}
+
+ReadUnitPipelineDescriptionPtr ReadFromObjectStorageStep::makeFlatReadPipelineDescription(
+    const ContextPtr & local_context, const FormatParserSharedResourcesPtr & parser_shared_resources) const
+{
+    if (!local_context->getSettingsRef()[Setting::object_storage_flat_read_pipeline])
+        return nullptr;
+
+    /// Not supported by the flat read pipeline yet:
+    /// - the count-only reads take the number of rows from the metadata or the cache instead of reading the files;
+    /// - the files in archives;
+    /// - the lazy reads, which need the row index of each file before the deletes;
+    /// - the row lineage columns of Iceberg, which are read from the data file or computed from its position.
+    if (need_only_count || configuration->isArchive() || lazy_row_index_registry)
+        return nullptr;
+    for (const auto * name : {"_row_id", "_last_updated_sequence_number"})
+        if (info.requested_virtual_columns.contains(name))
+            return nullptr;
+#if USE_PARQUET
+    /// The legacy Delta Lake reader replaces the partition columns in the chunks the format returns,
+    /// which the flat read pipeline does not do.
+    if (std::dynamic_pointer_cast<const DeltaLakeMetadata>(configuration->getExternalMetadata()))
+        return nullptr;
+#endif
+
+    /// The columns `requested_columns` are extracted from, as the format returns them.
+    Block post_filter_header;
+    for (const auto & column : info.requested_columns)
+    {
+        const String & name = info.format_header.has(column.name) ? column.name : column.getNameInStorage();
+        if (post_filter_header.has(name))
+            continue;
+        const auto * format_column = info.format_header.findByName(name);
+        if (!format_column)
+            return nullptr;
+        post_filter_header.insert(format_column->cloneEmpty());
+    }
+
+    NameSet columns_not_from_file;
+    for (const auto & column : info.hive_partition_columns_to_read_from_file_path)
+        columns_not_from_file.insert(column.name);
+    for (const auto & column : info.requested_virtual_columns)
+        columns_not_from_file.insert(column.name);
+
+    Block pre_filter_header = post_filter_header;
+    NameSet filter_inputs;
+    auto add_filter_inputs = [&](const ActionsDAG & actions)
+    {
+        for (const auto & input : actions.getRequiredColumns())
+        {
+            /// The filters which reference them are not pushed to the format.
+            if (columns_not_from_file.contains(input.name))
+                return false;
+            filter_inputs.insert(input.name);
+            if (const auto * existing = pre_filter_header.findByName(input.name))
+            {
+                if (!existing->type->equals(*input.type))
+                    return false;
+                continue;
+            }
+            pre_filter_header.insert({input.type->createColumn(), input.type, input.name});
+        }
+        return true;
+    };
+
+    NameSet columns_computed_by_filters;
+    const auto & row_level_filter = query_info.row_level_filter;
+    if (row_level_filter)
+    {
+        if (!add_filter_inputs(row_level_filter->actions))
+            return nullptr;
+        const auto * filter_node = row_level_filter->actions.tryFindInOutputs(row_level_filter->column_name);
+        if (!filter_node)
+            return nullptr;
+        if (filter_node->type != ActionsDAG::ActionType::INPUT)
+            columns_computed_by_filters.insert(filter_node->result_name);
+    }
+
+    const auto & prewhere_info = query_info.prewhere_info;
+    if (prewhere_info)
+    {
+        if (!add_filter_inputs(prewhere_info->prewhere_actions))
+            return nullptr;
+        for (const auto * output : prewhere_info->prewhere_actions.getOutputs())
+        {
+            if (output->type == ActionsDAG::ActionType::INPUT)
+                continue;
+            columns_computed_by_filters.insert(output->result_name);
+            if (const auto * existing = pre_filter_header.findByName(output->result_name))
+            {
+                if (!existing->type->equals(*output->result_type))
+                    return nullptr;
+                continue;
+            }
+            pre_filter_header.insert({output->result_type->createColumn(), output->result_type, output->result_name});
+        }
+    }
+
+    /// A column which is both read from the file and computed by a filter (e.g. an alias with the name of an input).
+    for (const auto & name : columns_computed_by_filters)
+        if (filter_inputs.contains(name))
+            return nullptr;
+
+    auto description = std::make_shared<ReadUnitPipelineDescription>();
+    for (const auto & column : pre_filter_header)
+        if (!post_filter_header.has(column.name))
+            description->columns_missing_if_filters_applied_by_reader.insert(column.name);
+    description->columns_computed_by_filters = std::move(columns_computed_by_filters);
+    description->pre_filter_header = std::make_shared<const Block>(std::move(pre_filter_header));
+    description->post_filter_header = std::make_shared<const Block>(std::move(post_filter_header));
+    description->row_level_filter = row_level_filter;
+    description->prewhere_info = prewhere_info;
+    description->read_from_format_info = info;
+    description->configuration = configuration;
+    description->storage_id = storage_id;
+    description->format_settings = format_settings;
+    description->parser_shared_resources = parser_shared_resources;
+    description->context = local_context;
+    return description;
 }
 
 void ReadFromObjectStorageStep::createIterator()

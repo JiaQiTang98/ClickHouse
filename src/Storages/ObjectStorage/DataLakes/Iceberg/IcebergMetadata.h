@@ -187,6 +187,13 @@ public:
 
     void modifyFormatSettings(FormatSettings & format_settings, const Context & local_context) const override;
     void addDeleteTransformers(ObjectInfoPtr object_info, QueryPipelineBuilder & builder, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override;
+    void addReadUnitTransforms(Pipe & pipe, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override;
+    std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
+        ObjectInfoPtr object_info,
+        const SharedHeader & header,
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override;
     void checkAlterIsPossible(const AlterCommands & commands) override;
     void checkAlterPartitionIsPossible(const PartitionCommands & commands) const override;
     void alter(
@@ -240,6 +247,15 @@ public:
     }
 
 private:
+    /// Reads the equality delete file and makes the filter which removes the rows of the data file it deletes.
+    EqualityDeleteFilter makeEqualityDeleteFilter(
+        const IcebergDataObjectInfo & iceberg_object_info,
+        const Iceberg::EqualityDeleteObject & delete_file,
+        const SharedHeader & header,
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const;
+
     static std::pair<Iceberg::PersistentTableComponents, Iceberg::MetadataFileWithInfo> initializePersistentTableComponents(
         ObjectStoragePtr object_storage,
         StorageObjectStorageConfigurationPtr configuration,

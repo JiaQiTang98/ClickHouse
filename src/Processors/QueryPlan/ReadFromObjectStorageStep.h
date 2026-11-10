@@ -12,6 +12,10 @@ class LazilyReadFromObjectStorage;
 struct LazyObjectStorageFileRegistry;
 using LazyObjectStorageFileRegistryPtr = std::shared_ptr<LazyObjectStorageFileRegistry>;
 struct ObjectStorageTopKQueryConditionCacheKey;
+struct ReadUnitPipelineDescription;
+using ReadUnitPipelineDescriptionPtr = std::shared_ptr<const ReadUnitPipelineDescription>;
+struct FormatParserSharedResources;
+using FormatParserSharedResourcesPtr = std::shared_ptr<FormatParserSharedResources>;
 using ObjectStorageTopKQueryConditionCacheKeyPtr = std::shared_ptr<const ObjectStorageTopKQueryConditionCacheKey>;
 
 class ReadFromObjectStorageStep : public SourceStepWithFilter
@@ -95,6 +99,11 @@ public:
 private:
     /// What the main read keeps besides `required_names` when columns are split off.
     NameSet getNamesToKeepInMainRead(const NameSet & required_names) const;
+
+    /// The description of the processors after the sources if the read is done with a flat read pipeline
+    /// (`object_storage_flat_read_pipeline`), or null if it is done with a nested pipeline per file.
+    ReadUnitPipelineDescriptionPtr makeFlatReadPipelineDescription(
+        const ContextPtr & local_context, const FormatParserSharedResourcesPtr & parser_shared_resources) const;
 
     StorageID storage_id;
     ObjectStoragePtr object_storage;

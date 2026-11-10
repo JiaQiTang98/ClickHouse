@@ -492,6 +492,21 @@ public:
         getMetadata()->addDeleteTransformers(object_info, builder, format_settings, parser_shared_resources, local_context);
     }
 
+    void addReadUnitTransforms(Pipe & pipe, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override
+    {
+        getMetadata()->addReadUnitTransforms(pipe, format_settings, parser_shared_resources, local_context);
+    }
+
+    std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
+        ObjectInfoPtr object_info,
+        const SharedHeader & header,
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override
+    {
+        return getMetadata()->getEqualityDeleteFilters(object_info, header, format_settings, parser_shared_resources, local_context);
+    }
+
     void fromDisk(const String & disk_name, ASTs & args, ContextPtr context, bool with_structure) override
     {
         if (!Context::getGlobalContextInstance()->getAllowedDisksForTableEngines().contains(disk_name))

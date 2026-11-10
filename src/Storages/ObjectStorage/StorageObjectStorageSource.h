@@ -12,6 +12,7 @@
 #include <Processors/Formats/IInputFormat.h>
 #include <Storages/ObjectStorage/StorageObjectStorage.h>
 #include <Storages/ObjectStorage/IObjectIterator.h>
+#include <Storages/ObjectStorage/ReadUnitNormalizer.h>
 #include <Formats/FormatFilterInfo.h>
 
 namespace DB
@@ -34,6 +35,9 @@ struct ObjectStorageTopKQueryConditionCacheKey
     String condition;
 };
 using ObjectStorageTopKQueryConditionCacheKeyPtr = std::shared_ptr<const ObjectStorageTopKQueryConditionCacheKey>;
+
+struct ReadUnitPipelineDescription;
+using ReadUnitPipelineDescriptionPtr = std::shared_ptr<const ReadUnitPipelineDescription>;
 
 class StorageObjectStorageSource final : public ISource
 {
@@ -60,7 +64,10 @@ public:
         FormatFilterInfoPtr format_filter_info_,
         bool need_only_count_,
         LazyObjectStorageFileRegistryPtr lazy_row_index_registry_ = nullptr,
-        ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key_ = nullptr);
+        ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key_ = nullptr,
+        /// If set, the source reads in the flat mode (`object_storage_flat_read_pipeline`): it outputs the chunks
+        /// in `pre_filter_header` with `ChunkInfoReadUnit`, to be processed by `addReadUnitTransforms`.
+        ReadUnitPipelineDescriptionPtr flat_read_pipeline_ = nullptr);
 
     ~StorageObjectStorageSource() override;
 
@@ -69,6 +76,11 @@ public:
     Chunk generate() override;
 
     void onFinish() override;
+
+protected:
+    void onCancel() noexcept override;
+
+public:
 
     static std::shared_ptr<IObjectIterator> createFileIterator(
         StorageObjectStorageConfigurationPtr configuration,
@@ -122,6 +134,8 @@ public:
         size_t approx_bytes_read = 0;
         /// The index of the file in `LazyObjectStorageFileRegistry`, set only for lazy materialization.
         std::optional<UInt64> lazy_file_index;
+        /// The response headers for `_headers`, if they were taken from `read_buf` before.
+        const Map * headers = nullptr;
     };
 
     /// Adds to a chunk read from a data file the columns which are not read from the file: hive partition
@@ -145,6 +159,8 @@ protected:
     /// The `table_id` of the query condition cache entries (see `QueryConditionCache::getTableIdForFileEntries`).
     UUID query_condition_cache_table_id = UUIDHelpers::Nil;
     ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key;
+    /// Null in the nested mode.
+    const ReadUnitPipelineDescriptionPtr flat_read_pipeline;
 
     /// A file read by a TopN read, whose query condition cache entry is written only when the source
     /// is destroyed: the row groups without a row of the result are known only once the threshold is
@@ -179,11 +195,20 @@ protected:
             std::unique_ptr<QueryPipeline> pipeline_,
             std::unique_ptr<PullingPipelineExecutor> reader_);
 
+        /// The flat mode: the chunks of `input_format_` are brought to the common header by `normalizer_`.
+        ReaderHolder(
+            ObjectInfoPtr object_info_,
+            std::unique_ptr<ReadBuffer> read_buf_,
+            InputFormatPtr input_format_,
+            std::unique_ptr<ReadUnitNormalizer> normalizer_,
+            bool filters_applied_by_reader_);
+
         ReaderHolder() = default;
         ReaderHolder(ReaderHolder && other) noexcept { *this = std::move(other); }
         ReaderHolder & operator=(ReaderHolder && other) noexcept;
 
-        explicit operator bool() const { return reader != nullptr; }
+        explicit operator bool() const { return reader != nullptr || normalizer != nullptr; }
+        bool isFlat() const { return normalizer != nullptr; }
         PullingPipelineExecutor * operator->() { return reader.get(); }
         const PullingPipelineExecutor * operator->() const { return reader.get(); }
 
@@ -198,15 +223,31 @@ protected:
         const IInputFormat * getInputFormat() const { return dynamic_cast<const IInputFormat *>(source.get()); }
         ReadBuffer * readBuffer() const { return read_buf.get(); }
 
+        /// The flat mode only.
+        IInputFormat & getFlatInputFormat() const { return *flat_input_format; }
+        ReadUnitNormalizer & getNormalizer() const { return *normalizer; }
+        bool filtersAppliedByReader() const { return filters_applied_by_reader; }
+        /// Made on the first chunk.
+        ReadUnitContextPtr read_unit_context;
+
+        /// May be called in parallel with reading.
+        void cancel() noexcept;
+
     private:
         ObjectInfoPtr object_info;
         std::unique_ptr<ReadBuffer> read_buf;
         std::shared_ptr<ISource> source;
         std::unique_ptr<QueryPipeline> pipeline;
         std::unique_ptr<PullingPipelineExecutor> reader;
+        /// The flat mode only. `flat_input_format` is the same as `source`.
+        IInputFormat * flat_input_format = nullptr;
+        std::unique_ptr<ReadUnitNormalizer> normalizer;
+        bool filters_applied_by_reader = true;
     };
 
     ReaderHolder reader;
+    /// Guards the replacement of `reader` from `onCancel`, which may be called in parallel with `generate`.
+    std::mutex reader_mutex;
     ThreadPoolCallbackRunnerUnsafe<ReaderHolder> create_reader_scheduler;
     std::future<ReaderHolder> reader_future;
 
@@ -235,7 +276,8 @@ protected:
         FormatFilterInfoPtr format_filter_info,
         bool need_only_count,
         ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key = nullptr,
-        bool prefetch_input_format = false);
+        bool prefetch_input_format = false,
+        const ReadUnitPipelineDescriptionPtr & flat_read_pipeline = nullptr);
 
     ReaderHolder createReader(bool prefetch_input_format = false);
 
@@ -291,6 +333,19 @@ protected:
         const ContextPtr & context_,
         size_t max_block_size,
         FormatParserSharedResourcesPtr parser_shared_resources);
+
+    /// Makes the reader of an opened data file in the flat mode, see `ReadUnitNormalizer`.
+    static ReaderHolder buildFlatReader(
+        OpenedReadUnit unit,
+        const StorageObjectStorageConfigurationPtr & configuration,
+        const ReadFromFormatInfo & read_from_format_info,
+        const std::optional<FormatSettings> & format_settings,
+        const ContextPtr & context_,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        const ReadUnitPipelineDescription & flat_read_pipeline);
+
+    /// Reads the next chunk of the current data file in the flat mode, returns false at the end of the file.
+    bool pullFlat(Chunk & chunk);
 
     /// Writes `pending_top_k_query_condition_cache_entries` to the query condition cache.
     void writePendingTopKQueryConditionCacheEntries();

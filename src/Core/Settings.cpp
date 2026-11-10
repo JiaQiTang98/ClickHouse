@@ -11424,6 +11424,12 @@ Use Paimon partition pruning for Paimon table functions
 Allow to use hive partitioning with S3Queue/AzureQueue engines
 )", EXPERIMENTAL, \
         {"26.1", false, false, "New setting."}) \
+    DECLARE(Bool, object_storage_flat_read_pipeline, false, R"(
+Build the per-file processing of object storage and data lake reads (deletes, stripped filters, defaults, column extraction) as processors of the main query pipeline instead of a nested pipeline per file.
+
+In this mode `read_rows` counts the rows read from files before position deletes, deletion vectors and filters not applied by the format reader, so the limits `max_rows_to_read` and `max_bytes_to_read` may trigger earlier than in the default mode.
+)", EXPERIMENTAL, \
+        {"26.11", false, false, "New experimental setting."}) \
 DECLARE(JoinOrderAlgorithm, query_plan_optimize_join_order_algorithm, "dpsub,greedy", R"(
 Specifies which JOIN order algorithms to attempt during query plan optimization. The following algorithms are available:
  - 'greedy' - basic greedy algorithm - works fast but might not produce the best join order

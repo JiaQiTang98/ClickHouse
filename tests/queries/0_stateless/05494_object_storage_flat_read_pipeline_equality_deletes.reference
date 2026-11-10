@@ -1,0 +1,15 @@
+all rows
+881	448755	9
+881	448755	9
+PREWHERE on a column of an equality delete
+[(0,'name_0'),(1,'name_1'),(2,'name_2'),(4,'name_4'),(5,'name_5'),(6,'name_6'),(7,'name_7'),(8,'name_8'),(30,'name_0'),(31,'name_1'),(32,'name_2'),(33,'name_3'),(34,'name_4'),(35,'name_5'),(36,'name_6'),(37,'name_7'),(38,'name_8')]
+[(0,'name_0'),(1,'name_1'),(2,'name_2'),(4,'name_4'),(5,'name_5'),(6,'name_6'),(7,'name_7'),(8,'name_8'),(30,'name_0'),(31,'name_1'),(32,'name_2'),(33,'name_3'),(34,'name_4'),(35,'name_5'),(36,'name_6'),(37,'name_7'),(38,'name_8')]
+a column which is used only by the equality deletes is not selected
+196	99430
+196	99430
+virtual columns
+881	881	0	0
+881	881	0	0
+a required column with an optional equality delete column
+['bar','world']
+['bar','world']

@@ -52,6 +52,7 @@
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergDataObjectInfo.h>
 #include <Storages/ObjectStorage/StorageObjectStorage.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
+#include <Storages/ObjectStorage/ReadUnitTransforms.h>
 #include <Storages/ObjectStorage/Utils.h>
 #include <Storages/VirtualColumnUtils.h>
 #include <boost/algorithm/string/predicate.hpp>
@@ -125,6 +126,7 @@ namespace ErrorCodes
     extern const int FILE_DOESNT_EXIST;
     extern const int TOO_MANY_ROWS;
     extern const int UNSUPPORTED_METHOD;
+    extern const int QUERY_WAS_CANCELLED;
 }
 
 namespace
@@ -347,8 +349,9 @@ StorageObjectStorageSource::StorageObjectStorageSource(
     FormatFilterInfoPtr format_filter_info_,
     bool need_only_count_,
     LazyObjectStorageFileRegistryPtr lazy_row_index_registry_,
-    ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key_)
-    : ISource(std::make_shared<const Block>(info.source_header), false)
+    ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key_,
+    ReadUnitPipelineDescriptionPtr flat_read_pipeline_)
+    : ISource(flat_read_pipeline_ ? flat_read_pipeline_->pre_filter_header : std::make_shared<const Block>(info.source_header), false)
     , storage_id(storage_id_)
     , name(std::move(name_))
     , object_storage(object_storage_)
@@ -361,6 +364,7 @@ StorageObjectStorageSource::StorageObjectStorageSource(
     , parser_shared_resources(std::move(parser_shared_resources_))
     , format_filter_info(std::move(format_filter_info_))
     , top_k_query_condition_cache_key(std::move(top_k_query_condition_cache_key_))
+    , flat_read_pipeline(std::move(flat_read_pipeline_))
     , read_from_format_info(info)
     , create_reader_pool(
           std::make_shared<ThreadPool>(
@@ -838,7 +842,11 @@ void StorageObjectStorageSource::lazyInitialize()
     if (initialized)
         return;
 
-    reader = createReader();
+    auto first_reader = createReader();
+    {
+        std::lock_guard lock(reader_mutex);
+        reader = std::move(first_reader);
+    }
     if (reader)
     {
         ++total_files_read;
@@ -853,6 +861,76 @@ void StorageObjectStorageSource::onFinish()
     parser_shared_resources->finishStream();
 }
 
+void StorageObjectStorageSource::onCancel() noexcept
+{
+    /// In the nested mode the reader is cancelled by `generate`.
+    if (!flat_read_pipeline)
+        return;
+
+    std::lock_guard lock(reader_mutex);
+    if (reader)
+        reader.cancel();
+}
+
+bool StorageObjectStorageSource::pullFlat(Chunk & chunk)
+{
+    auto & input_format = reader.getFlatInputFormat();
+    while (!isCancelled())
+    {
+        try
+        {
+            chunk = input_format.generate();
+        }
+        catch (const Exception & e)
+        {
+            /// The format was cancelled while reading, e.g. because a processor after the source has thrown:
+            /// report that processor's exception, not the cancellation (in the nested mode the format is not
+            /// read after the cancellation, because the nested executor stops).
+            if (e.code() == ErrorCodes::QUERY_WAS_CANCELLED && isCancelled())
+                return false;
+            throw;
+        }
+        if (!chunk)
+        {
+            input_format.onFinish();
+            return false;
+        }
+
+        const size_t num_rows_read = chunk.getNumRows();
+        const size_t bytes_read = input_format.getApproxBytesReadForChunk();
+        const size_t bytes_read_before_normalization = chunk.bytes();
+
+        reader.getNormalizer().normalize(chunk, input_format.getMissingValues(), is_cancelled);
+
+        /// The rows deleted by the equality deletes are read as well.
+        progress(num_rows_read, bytes_read ? bytes_read : bytes_read_before_normalization);
+        total_rows_in_file += num_rows_read;
+
+        if (chunk.getNumRows() == 0)
+            continue;
+
+        if (!reader.read_unit_context)
+        {
+            const auto & object_info = reader.getObjectInfo();
+            auto read_unit_context = std::make_shared<ReadUnitContext>();
+            read_unit_context->object_info = object_info;
+            read_unit_context->filters_applied_by_reader = reader.filtersAppliedByReader();
+            if (lazy_row_index_registry)
+                read_unit_context->lazy_file_index = lazy_row_index_registry->registerFile(object_info);
+            /// The response headers are known only after the first read from the buffer.
+            if (read_from_format_info.requested_virtual_columns.contains("_headers"))
+                read_unit_context->headers = tryGetHeadersFromReadBuffer(reader.readBuffer())
+                    .value_or(objectAttributesToMap(object_info->getObjectMetadata()->attributes));
+            read_unit_context->data_lake_snapshot_version = file_iterator->getSnapshotVersion();
+            reader.read_unit_context = std::move(read_unit_context);
+        }
+
+        chunk.getChunkInfos().add(std::make_shared<ChunkInfoReadUnit>(reader.read_unit_context));
+        return true;
+    }
+    return false;
+}
+
 Chunk StorageObjectStorageSource::generate()
 {
     lazyInitialize();
@@ -862,12 +940,20 @@ Chunk StorageObjectStorageSource::generate()
         if (isCancelled() || !reader)
         {
             if (reader)
-                reader->cancel();
+                reader.cancel();
             break;
         }
 
         Chunk chunk;
-        if (reader->pull(chunk))
+        if (reader.isFlat())
+        {
+            if (pullFlat(chunk))
+                return chunk;
+            /// A cancelled read has not seen all row groups of the file, so nothing is written to the caches.
+            if (isCancelled())
+                continue;
+        }
+        else if (reader->pull(chunk))
         {
             UInt64 num_rows = chunk.getNumRows();
             total_rows_in_file += num_rows;
@@ -910,7 +996,7 @@ Chunk StorageObjectStorageSource::generate()
         /// file that does not store the sort column) writes them as without TopN - unless the entries of the
         /// TopK key made it skip row groups that the predicate alone would not, or
         /// `use_query_condition_cache_for_top_k` is off, which makes a TopN read (unless statistics-only) not populate the cache at all.
-        else if (format_filter_info->condition_hash && !reader.skipped_row_groups_by_top_k_entry
+        if (format_filter_info->condition_hash && !reader.skipped_row_groups_by_top_k_entry
             && !(format_filter_info->top_k_filter && format_filter_info->top_k_filter->filter_rows
                 && !read_context->getSettingsRef()[Setting::use_query_condition_cache_for_top_k])
             && !(reader.getInputFormat() && reader.getInputFormat()->isTopKFilterApplied()))
@@ -1010,7 +1096,9 @@ Chunk StorageObjectStorageSource::generate()
         chassert(reader_future.valid());
         {
             ProfileEventTimeIncrement<Microseconds> watch(ProfileEvents::ObjectStorageReaderWaitMicroseconds);
-            reader = reader_future.get();
+            auto next_reader = reader_future.get();
+            std::lock_guard lock(reader_mutex);
+            reader = std::move(next_reader);
         }
         current_file_index.reset();
 
@@ -1144,7 +1232,9 @@ void StorageObjectStorageSource::addReadUnitColumns(
             std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()),
             std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()));
 
-        const Map headers = tryGetHeadersFromReadBuffer(unit.read_buf).value_or(objectAttributesToMap(object_metadata->attributes));
+        const Map headers = unit.headers
+            ? *unit.headers
+            : tryGetHeadersFromReadBuffer(unit.read_buf).value_or(objectAttributesToMap(object_metadata->attributes));
 
         chunk.addColumn(type->createColumnConst(
             chunk.getNumRows(),
@@ -1326,7 +1416,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         format_filter_info,
         need_only_count,
         top_k_query_condition_cache_key,
-        prefetch_input_format);
+        prefetch_input_format,
+        flat_read_pipeline);
 }
 
 StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReader(
@@ -1346,7 +1437,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
     FormatFilterInfoPtr format_filter_info,
     bool need_only_count,
     ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key,
-    bool prefetch_input_format)
+    bool prefetch_input_format,
+    const ReadUnitPipelineDescriptionPtr & flat_read_pipeline)
 {
     auto unit = openReadUnit(
         processor,
@@ -1368,6 +1460,11 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         prefetch_input_format);
     if (!unit)
         return {};
+
+    if (flat_read_pipeline)
+        return buildFlatReader(
+            std::move(*unit), configuration, read_from_format_info, format_settings, context_, parser_shared_resources,
+            *flat_read_pipeline);
 
     return buildNestedReader(
         std::move(*unit), configuration, read_from_format_info, format_settings, context_, max_block_size, parser_shared_resources);
@@ -2240,6 +2337,70 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildNested
     return result;
 }
 
+StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatReader(
+    OpenedReadUnit unit,
+    const StorageObjectStorageConfigurationPtr & configuration,
+    const ReadFromFormatInfo & read_from_format_info,
+    const std::optional<FormatSettings> & format_settings,
+    const ContextPtr & context_,
+    FormatParserSharedResourcesPtr parser_shared_resources,
+    const ReadUnitPipelineDescription & flat_read_pipeline)
+{
+    /// The count-only reads and the row lineage columns are read in the nested mode, see `ReadFromObjectStorageStep`.
+    if (unit.num_rows_from_cache || !unit.input_format || !unit.row_lineage_columns.empty())
+        throw Exception(
+            ErrorCodes::LOGICAL_ERROR,
+            "Data file {} cannot be read with a flat read pipeline: it is not read or it has row lineage columns",
+            unit.object_info->getPath());
+
+    const auto & object_info = unit.object_info;
+    const auto input_header = unit.input_format->getPort().getSharedHeader();
+    const auto & pre_filter_header = *flat_read_pipeline.pre_filter_header;
+
+    std::optional<ActionsDAG> identity_partition_columns_dag;
+    if (!unit.identity_partition_columns.empty())
+        identity_partition_columns_dag = buildIdentityPartitionColumnsDag(*input_header, unit.identity_partition_columns);
+
+    auto equality_delete_filters
+        = configuration->getEqualityDeleteFilters(object_info, input_header, format_settings, parser_shared_resources, context_);
+
+    /// The same as in `buildNestedReader`.
+    std::optional<ActionsDAG> schema_transform;
+    if (object_info->data_lake_metadata && object_info->data_lake_metadata->schema_transform)
+    {
+        schema_transform = object_info->data_lake_metadata->schema_transform->clone();
+        Names needed_names;
+        for (const auto & column : pre_filter_header)
+            if (schema_transform->tryFindInOutputs(column.name))
+                needed_names.push_back(column.name);
+        schema_transform->removeUnusedActions(needed_names);
+    }
+    if (!schema_transform)
+    {
+        if (auto transform = configuration->getSchemaTransformer(context_, object_info))
+            schema_transform = transform->clone();
+    }
+
+    const bool filters_applied_by_reader = !unit.stripped_row_level_filter && !unit.stripped_prewhere_info;
+
+    auto normalizer = std::make_unique<ReadUnitNormalizer>(
+        input_header,
+        std::move(identity_partition_columns_dag),
+        std::move(equality_delete_filters),
+        std::move(schema_transform),
+        read_from_format_info.columns_description,
+        context_,
+        flat_read_pipeline.pre_filter_header,
+        filters_applied_by_reader ? flat_read_pipeline.columns_missing_if_filters_applied_by_reader
+                                  : flat_read_pipeline.columns_computed_by_filters);
+
+    ReaderHolder result(
+        object_info, std::move(unit.read_buf), std::move(unit.input_format), std::move(normalizer), filters_applied_by_reader);
+    result.use_top_k_query_condition_cache_key = unit.use_top_k_query_condition_cache_key;
+    result.skipped_row_groups_by_top_k_entry = unit.skipped_row_groups_by_top_k_entry;
+    return result;
+}
+
 std::future<StorageObjectStorageSource::ReaderHolder> StorageObjectStorageSource::createReaderAsync()
 {
     return create_reader_scheduler([=, this] { return createReader(/* prefetch_input_format */ true); }, Priority{});
@@ -2838,6 +2999,31 @@ StorageObjectStorageSource::ReaderHolder::ReaderHolder(
 {
 }
 
+StorageObjectStorageSource::ReaderHolder::ReaderHolder(
+    ObjectInfoPtr object_info_,
+    std::unique_ptr<ReadBuffer> read_buf_,
+    InputFormatPtr input_format_,
+    std::unique_ptr<ReadUnitNormalizer> normalizer_,
+    bool filters_applied_by_reader_)
+    : object_info(std::move(object_info_))
+    , read_buf(std::move(read_buf_))
+    , source(input_format_)
+    , flat_input_format(input_format_.get())
+    , normalizer(std::move(normalizer_))
+    , filters_applied_by_reader(filters_applied_by_reader_)
+{
+}
+
+void StorageObjectStorageSource::ReaderHolder::cancel() noexcept
+{
+    if (reader)
+        reader->cancel();
+    if (flat_input_format)
+        flat_input_format->cancel();
+    if (normalizer)
+        normalizer->cancel();
+}
+
 StorageObjectStorageSource::ReaderHolder &
 StorageObjectStorageSource::ReaderHolder::operator=(ReaderHolder && other) noexcept
 {
@@ -2845,6 +3031,10 @@ StorageObjectStorageSource::ReaderHolder::operator=(ReaderHolder && other) noexc
     /// reader uses pipeline, pipeline uses read_buf.
     reader = std::move(other.reader);
     pipeline = std::move(other.pipeline);
+    normalizer = std::move(other.normalizer);
+    flat_input_format = std::exchange(other.flat_input_format, nullptr);
+    filters_applied_by_reader = other.filters_applied_by_reader;
+    read_unit_context = std::move(other.read_unit_context);
     source = std::move(other.source);
     read_buf = std::move(other.read_buf);
     object_info = std::move(other.object_info);

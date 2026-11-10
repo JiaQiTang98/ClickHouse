@@ -14,6 +14,7 @@
 #include <Storages/AlterCommands.h>
 #include <Storages/IStorage_fwd.h>
 #include <Storages/ObjectStorage/DataLakes/DataLakeTableStateSnapshot.h>
+#include <Storages/ObjectStorage/ReadUnitContext.h>
 #include <Storages/MutationCommands.h>
 #include <Storages/prepareReadingFromFormat.h>
 #include <Disks/DiskType.h>
@@ -206,6 +207,19 @@ public:
     virtual void checkMutationIsPossible(const MutationCommands & /*commands*/) { throwNotImplemented("mutations"); }
 
     virtual void addDeleteTransformers(ObjectInfoPtr, QueryPipelineBuilder &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const { }
+
+    /// For `object_storage_flat_read_pipeline`: appends to each stream of the read the processors which apply the deletes
+    /// of the data files, except the equality deletes and the deletion vectors in `DataLakeObjectMetadata`. They switch
+    /// between the data files by `ChunkInfoReadUnit`, see `ReadUnitSwitchingTransform`.
+    virtual void addReadUnitTransforms(Pipe &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const { }
+
+    /// For `object_storage_flat_read_pipeline`: the equality deletes of a data file, as filters over the chunks
+    /// read from it with `header`.
+    virtual std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
+        ObjectInfoPtr, const SharedHeader & /*header*/, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+    {
+        return {};
+    }
     virtual void checkAlterIsPossible(const AlterCommands & /*commands*/) { throwNotImplemented("alter"); }
     virtual void checkAlterPartitionIsPossible(const PartitionCommands & /*commands*/) const { throwNotImplemented("alterPartition"); }
     virtual void alter(
