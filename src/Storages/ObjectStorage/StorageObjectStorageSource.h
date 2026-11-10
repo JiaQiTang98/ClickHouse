@@ -99,6 +99,37 @@ public:
     static std::optional<String> makeQueryConditionCacheKey(const ObjectInfo & object_info, bool is_data_lake);
     static std::optional<String> makeQueryConditionCacheKey(const String & identifier, const ObjectInfo & object_info, bool is_data_lake);
 
+    /// What the columns added by `addReadUnitColumns` depend on, the same for all data files of a read.
+    struct ReadUnitColumnsParams
+    {
+        const StorageObjectStorageConfigurationPtr & configuration;
+        const ReadFromFormatInfo & read_from_format_info;
+        const StorageID & storage_id;
+        const std::optional<FormatSettings> & format_settings;
+        const ContextPtr & context;
+        std::optional<UInt64> data_lake_snapshot_version;
+    };
+
+    /// What the columns added by `addReadUnitColumns` depend on, for one data file.
+    struct ReadUnitColumnsSource
+    {
+        const ObjectInfo & object_info;
+        /// False if the chunks are generated from the number of rows in the schema cache, without reading the file.
+        bool read_from_file = false;
+        /// The buffer the file is read from, for the response headers in `_headers`.
+        const ReadBuffer * read_buf = nullptr;
+        /// The number of bytes read for the chunk as reported by the input format, 0 if unknown.
+        size_t approx_bytes_read = 0;
+        /// The index of the file in `LazyObjectStorageFileRegistry`, set only for lazy materialization.
+        std::optional<UInt64> lazy_file_index;
+    };
+
+    /// Adds to a chunk read from a data file the columns which are not read from the file: hive partition
+    /// columns, virtual columns, `_headers`, `__global_row_index` and the partition columns of the old
+    /// DeltaLake implementation. Removes the materialized row lineage columns, from which the corresponding
+    /// virtual columns are made. Converts constant columns to full ones.
+    static void addReadUnitColumns(Chunk & chunk, const ReadUnitColumnsParams & params, const ReadUnitColumnsSource & unit);
+
 protected:
     StorageID storage_id;
     const String name;
@@ -207,6 +238,59 @@ protected:
         bool prefetch_input_format = false);
 
     ReaderHolder createReader(bool prefetch_input_format = false);
+
+    /// A data file opened for reading, see `openReadUnit`.
+    struct OpenedReadUnit
+    {
+        ObjectInfoPtr object_info;
+        /// Declared before `input_format`, which reads it.
+        std::unique_ptr<ReadBuffer> read_buf;
+        /// Null if the file is not read, because its number of rows is taken from the schema cache.
+        InputFormatPtr input_format;
+        std::optional<size_t> num_rows_from_cache;
+        /// The row lineage columns the format reads after the requested ones, see `getMaterializedRowLineageColumns`.
+        Names row_lineage_columns;
+        /// The values of the identity-partitioned columns of an Iceberg data file.
+        std::vector<std::pair<String, Field>> identity_partition_columns;
+        /// The filters which the format does not apply, because it does not support them or because the
+        /// file is read under the names of another schema. They are applied to the chunks of the format.
+        FilterDAGInfoPtr stripped_row_level_filter;
+        PrewhereInfoPtr stripped_prewhere_info;
+        bool use_top_k_query_condition_cache_key = false;
+        bool skipped_row_groups_by_top_k_entry = false;
+    };
+
+    /// Takes the next data file from `file_iterator` and creates the reader of its format, or returns
+    /// nullopt if there are no more files. The arguments are the same as of `createReader`.
+    static std::optional<OpenedReadUnit> openReadUnit(
+        size_t processor,
+        const StorageID & storage_id,
+        const UUID & query_condition_cache_table_id,
+        const std::shared_ptr<IObjectIterator> & file_iterator,
+        const StorageObjectStorageConfigurationPtr & configuration,
+        const ObjectStoragePtr & object_storage,
+        ReadFromFormatInfo & read_from_format_info,
+        const std::optional<FormatSettings> & format_settings,
+        const ContextPtr & context_,
+        SchemaCache * schema_cache,
+        const LoggerPtr & log,
+        size_t max_block_size,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        FormatFilterInfoPtr format_filter_info,
+        bool need_only_count,
+        ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key,
+        bool prefetch_input_format);
+
+    /// Builds the pipeline which processes the chunks of an opened data file: the deletes, the schema
+    /// transform, the stripped filters, the defaults and the extraction of the requested columns.
+    static ReaderHolder buildNestedReader(
+        OpenedReadUnit unit,
+        const StorageObjectStorageConfigurationPtr & configuration,
+        const ReadFromFormatInfo & read_from_format_info,
+        const std::optional<FormatSettings> & format_settings,
+        const ContextPtr & context_,
+        size_t max_block_size,
+        FormatParserSharedResourcesPtr parser_shared_resources);
 
     /// Writes `pending_top_k_query_condition_cache_entries` to the query condition cache.
     void writePendingTopKQueryConditionCacheEntries();

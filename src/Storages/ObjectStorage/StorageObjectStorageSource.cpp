@@ -879,240 +879,26 @@ Chunk StorageObjectStorageSource::generate()
             progress(num_rows, chunk_size ? chunk_size : chunk.bytes());
 
             const auto & object_info = reader.getObjectInfo();
-            const auto & filename = object_info->getFileName();
-            std::string full_path = object_info->getPath();
+            if (lazy_row_index_registry && !current_file_index)
+                current_file_index = lazy_row_index_registry->registerFile(object_info);
 
-            const auto reading_path = configuration->getPathForRead().path;
-
-            if (!full_path.starts_with(reading_path) && !trySplitFullyQualifiedObjectPath(full_path))
-                full_path = fs::path(reading_path) / object_info->getPath();
-
-            auto object_metadata = object_info->getObjectMetadata();
-
-            chassert(object_metadata);
-
-            const auto path = getUniqueStoragePathIdentifier(*configuration, *object_info, false);
-
-            ColumnPtr materialized_row_ids;
-            ColumnPtr materialized_last_updated_sequence_numbers;
-            /// Without an input format the chunk comes from the count-from-cache path, which reads no
-            /// file and therefore carries no row lineage columns.
-            if (const auto lineage_columns = reader.getInputFormat()
-                    ? getMaterializedRowLineageColumns(
-                          *object_info, read_from_format_info, object_info->getFileFormat().value_or(configuration->format))
-                    : Names{};
-                !lineage_columns.empty())
-            {
-                auto columns = chunk.detachColumns();
-                chassert(columns.size() >= lineage_columns.size());
-                const size_t first_lineage_column = columns.size() - lineage_columns.size();
-
-                for (size_t i = 0; i < lineage_columns.size(); ++i)
-                {
-                    if (lineage_columns[i] == "_row_id")
-                        materialized_row_ids = columns[first_lineage_column + i];
-                    else
-                        materialized_last_updated_sequence_numbers = columns[first_lineage_column + i];
-                }
-
-                columns.resize(first_lineage_column);
-                chunk.setColumns(std::move(columns), num_rows);
-            }
-
-            /// The order is important, hive partition columns must be added before virtual columns
-            /// because they are part of the schema
-            if (!read_from_format_info.hive_partition_columns_to_read_from_file_path.empty())
-            {
-                HivePartitioningUtils::addPartitionColumnsToChunk(
-                    chunk,
-                    read_from_format_info.hive_partition_columns_to_read_from_file_path,
-                    path,
-                    format_settings,
-                    read_context);
-            }
-
-            const String * iceberg_metadata_file_path = nullptr;
-            std::optional<UInt64> last_updated_sequence_number;
-            std::optional<UInt64> first_row_id;
-#if USE_AVRO
-            if (const auto * iceberg_info = dynamic_cast<const IcebergDataObjectInfo *>(object_info.get()))
-            {
-                iceberg_metadata_file_path = &iceberg_info->info.data_object_file_path_key.serialize();
-                first_row_id = iceberg_info->info.first_row_id;
-                if (first_row_id.has_value())
-                    last_updated_sequence_number = iceberg_info->info.sequence_number;
-            }
-#endif
-
-            std::optional<size_t> object_size;
-            if (object_info->isArchive())
-                object_size = object_info->fileSizeInArchive();
-            else if (object_metadata->is_size_known)
-                object_size = object_metadata->size_bytes;
-
-            FailPointInjection::pauseFailPoint(FailPoints::object_storage_source_pause_before_virtual_columns);
-
-            VirtualColumnUtils::addRequestedFileLikeStorageVirtualsToChunk(
+            addReadUnitColumns(
                 chunk,
-                read_from_format_info.requested_virtual_columns,
                 {
-                    .path = path,
+                    .configuration = configuration,
+                    .read_from_format_info = read_from_format_info,
                     .storage_id = storage_id,
-                    .size = object_size,
-                    .filename = &filename,
-                    /// Report an unknown modification time (e.g. a web object whose HTTP response has no
-                    /// `Last-Modified` header) as `NULL` in `_time`, not as the default epoch `1970-01-01`.
-                    .last_modified = object_metadata->is_last_modified_known
-                        ? std::optional<Poco::Timestamp>(object_metadata->last_modified)
-                        : std::nullopt,
-                    .etag = &(object_metadata->etag),
-                    .tags = &(object_metadata->tags),
+                    .format_settings = format_settings,
+                    .context = read_context,
                     .data_lake_snapshot_version = file_iterator->getSnapshotVersion(),
-                    .iceberg_metadata_file_path = iceberg_metadata_file_path,
-                    .last_updated_sequence_number = last_updated_sequence_number,
-                    .first_row_id = first_row_id,
-                    .materialized_row_ids = materialized_row_ids,
-                    .materialized_last_updated_sequence_numbers = materialized_last_updated_sequence_numbers,
                 },
-                read_context,
-                format_settings);
-
-            if (read_from_format_info.requested_virtual_columns.contains("_headers"))
-            {
-                auto type = std::make_shared<DataTypeMap>(
-                    std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()),
-                    std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()));
-
-                const Map headers = tryGetHeadersFromReadBuffer(reader.readBuffer()).value_or(objectAttributesToMap(object_metadata->attributes));
-
-                chunk.addColumn(type->createColumnConst(
-                    chunk.getNumRows(),
-                    headers)->convertToFullColumnIfConst());
-            }
-
-            if (lazy_row_index_registry)
-            {
-                /// Lazy materialization: append the `__global_row_index` column, which combines the
-                /// index of the file within the query with the physical row number within the file.
-                if (!current_file_index)
-                    current_file_index = lazy_row_index_registry->registerFile(object_info);
-
-                auto row_numbers_info = chunk.getChunkInfos().get<ChunkInfoRowNumbers>();
-                if (!row_numbers_info)
-                    /// Only the Parquet reader provides physical row numbers. This is reachable for a
-                    /// mixed-format Iceberg snapshot (the table-level format is Parquet, but an individual
-                    /// data file has a different format), which is discovered only at read time because the
-                    /// file list is built dynamically. Report an actionable error instead of failing later.
-                    throw Exception(ErrorCodes::UNSUPPORTED_METHOD,
-                        "Lazy materialization requires physical row numbers from the format reader, "
-                        "but file {} (format {}) does not provide them. "
-                        "Disable the query_plan_optimize_lazy_materialization_for_object_storage setting to read such data.",
-                        object_info->getPath(), object_info->getFileFormat().value_or(configuration->format));
-
-                const auto & applied_filter = row_numbers_info->applied_filter;
-                size_t num_indices = applied_filter.has_value() ? applied_filter->size() : num_rows;
-                if (row_numbers_info->row_num_offset + num_indices > LazyObjectStorageFileRegistry::MAX_ROWS_PER_FILE)
-                    throw Exception(ErrorCodes::TOO_MANY_ROWS,
-                        "File {} has too many rows for lazy materialization. "
-                        "Disable the query_plan_optimize_lazy_materialization_for_object_storage setting",
-                        object_info->getPath());
-
-                const UInt64 file_part = *current_file_index << LazyObjectStorageFileRegistry::ROW_INDEX_BITS;
-                auto row_index_column = ColumnUInt64::create();
-                auto & row_index_data = row_index_column->getData();
-                row_index_data.reserve(num_rows);
-                for (size_t i = 0; i < num_indices; ++i)
                 {
-                    if (!applied_filter.has_value() || (*applied_filter)[i])
-                        row_index_data.push_back(file_part | (row_numbers_info->row_num_offset + i));
-                }
-
-                if (row_index_column->size() != num_rows)
-                    throw Exception(ErrorCodes::LOGICAL_ERROR,
-                        "Row numbers of a chunk are inconsistent with the number of rows: {} != {} (file {})",
-                        row_index_column->size(), num_rows, object_info->getPath());
-
-                chunk.addColumn(std::move(row_index_column));
-            }
-
-#if USE_PARQUET
-            if (chunk_size && chunk.hasColumns())
-            {
-                /// Old delta lake code which needs to be deprecated in favour of DeltaLakeMetadataDeltaKernel.
-                if (std::dynamic_pointer_cast<const DeltaLakeMetadata>(configuration->getExternalMetadata()))
-                {
-                    /// This is an awful temporary crutch,
-                    /// which will be removed once DeltaKernel is used by default for DeltaLake.
-                    /// (Because it does not make sense to support it in a nice way
-                    /// because the code will be removed ASAP anyway)
-                    if (configuration->isDataLakeConfiguration())
-                    {
-                        /// A terrible crutch, but it this code will be removed next month.
-                        DeltaLakePartitionColumns partition_columns;
-#if USE_AWS_S3
-                        if (auto * delta_conf_s3 = dynamic_cast<StorageS3DeltaLakeConfiguration *>(configuration.get()))
-                        {
-                            partition_columns = delta_conf_s3->getDeltaLakePartitionColumns();
-                        }
-#endif
-#if USE_AZURE_BLOB_STORAGE
-                        if (auto * delta_conf_azure = dynamic_cast<StorageAzureDeltaLakeConfiguration *>(configuration.get()))
-                        {
-                            partition_columns = delta_conf_azure->getDeltaLakePartitionColumns();
-                        }
-#endif
-                        if (auto * delta_conf_local = dynamic_cast<StorageLocalDeltaLakeConfiguration *>(configuration.get()))
-                        {
-                            partition_columns = delta_conf_local->getDeltaLakePartitionColumns();
-                        }
-                        if (!partition_columns.empty())
-                        {
-                            auto partition_values = partition_columns.find(full_path);
-                            if (partition_values != partition_columns.end())
-                            {
-                                for (const auto & [name_and_type, value] : partition_values->second)
-                                {
-                                    if (!read_from_format_info.source_header.has(name_and_type.name))
-                                        continue;
-
-                                    const auto column_pos = read_from_format_info.source_header.getPositionByName(name_and_type.name);
-                                    auto partition_column = name_and_type.type->createColumnConst(chunk.getNumRows(), value)->convertToFullColumnIfConst();
-                                    /// The `_delta_log` type differs from the declared one when the columns were
-                                    /// specified rather than inferred, and the block follows the declared schema.
-                                    const auto & declared_type = read_from_format_info.source_header.getByPosition(column_pos).type;
-                                    if (!name_and_type.type->equals(*declared_type))
-                                        partition_column = castColumn({partition_column, name_and_type.type, name_and_type.name}, declared_type);
-                                    /// This column is filled with default value now, remove it.
-                                    chunk.erase(column_pos);
-                                    /// Add correct values.
-                                    if (column_pos < chunk.getNumColumns())
-                                        chunk.addColumn(column_pos, std::move(partition_column));
-                                    else
-                                        chunk.addColumn(std::move(partition_column));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-#endif
-
-            /// Convert any Const columns to full columns before returning.
-            /// This is necessary because when chunks with different Const values (e.g., partition columns
-            /// from different files in DeltaLake) are squashed together during INSERT, the squashing code
-            /// doesn't properly handle merging Const columns with different constant values.
-            /// By converting to full columns here, we ensure the values are preserved correctly.
-            if (chunk.hasColumns())
-            {
-                size_t chunk_num_rows = chunk.getNumRows();
-                auto columns = chunk.detachColumns();
-                for (auto & column : columns)
-                {
-                    if (column->isConst())
-                        column = column->cloneResized(chunk_num_rows)->convertToFullColumnIfConst();
-                }
-                chunk.setColumns(std::move(columns), chunk_num_rows);
-            }
+                    .object_info = *object_info,
+                    .read_from_file = reader.getInputFormat() != nullptr,
+                    .read_buf = reader.readBuffer(),
+                    .approx_bytes_read = chunk_size,
+                    .lazy_file_index = current_file_index,
+                });
 
             return chunk;
         }
@@ -1243,6 +1029,250 @@ Chunk StorageObjectStorageSource::generate()
     return {};
 }
 
+void StorageObjectStorageSource::addReadUnitColumns(
+    Chunk & chunk, const ReadUnitColumnsParams & params, const ReadUnitColumnsSource & unit)
+{
+    const auto & configuration = params.configuration;
+    const auto & read_from_format_info = params.read_from_format_info;
+    const auto & storage_id = params.storage_id;
+    const auto & format_settings = params.format_settings;
+    const auto & read_context = params.context;
+    const auto & object_info = unit.object_info;
+    const size_t num_rows = chunk.getNumRows();
+
+    const auto & filename = object_info.getFileName();
+    std::string full_path = object_info.getPath();
+
+    const auto reading_path = configuration->getPathForRead().path;
+
+    if (!full_path.starts_with(reading_path) && !trySplitFullyQualifiedObjectPath(full_path))
+        full_path = fs::path(reading_path) / object_info.getPath();
+
+    auto object_metadata = object_info.getObjectMetadata();
+
+    chassert(object_metadata);
+
+    const auto path = getUniqueStoragePathIdentifier(*configuration, object_info, false);
+
+    ColumnPtr materialized_row_ids;
+    ColumnPtr materialized_last_updated_sequence_numbers;
+    /// Without an input format the chunk comes from the count-from-cache path, which reads no
+    /// file and therefore carries no row lineage columns.
+    if (const auto lineage_columns = unit.read_from_file
+            ? getMaterializedRowLineageColumns(
+                  object_info, read_from_format_info, object_info.getFileFormat().value_or(configuration->format))
+            : Names{};
+        !lineage_columns.empty())
+    {
+        auto columns = chunk.detachColumns();
+        chassert(columns.size() >= lineage_columns.size());
+        const size_t first_lineage_column = columns.size() - lineage_columns.size();
+
+        for (size_t i = 0; i < lineage_columns.size(); ++i)
+        {
+            if (lineage_columns[i] == "_row_id")
+                materialized_row_ids = columns[first_lineage_column + i];
+            else
+                materialized_last_updated_sequence_numbers = columns[first_lineage_column + i];
+        }
+
+        columns.resize(first_lineage_column);
+        chunk.setColumns(std::move(columns), num_rows);
+    }
+
+    /// The order is important, hive partition columns must be added before virtual columns
+    /// because they are part of the schema
+    if (!read_from_format_info.hive_partition_columns_to_read_from_file_path.empty())
+    {
+        HivePartitioningUtils::addPartitionColumnsToChunk(
+            chunk,
+            read_from_format_info.hive_partition_columns_to_read_from_file_path,
+            path,
+            format_settings,
+            read_context);
+    }
+
+    const String * iceberg_metadata_file_path = nullptr;
+    std::optional<UInt64> last_updated_sequence_number;
+    std::optional<UInt64> first_row_id;
+#if USE_AVRO
+    if (const auto * iceberg_info = dynamic_cast<const IcebergDataObjectInfo *>(&object_info))
+    {
+        iceberg_metadata_file_path = &iceberg_info->info.data_object_file_path_key.serialize();
+        first_row_id = iceberg_info->info.first_row_id;
+        if (first_row_id.has_value())
+            last_updated_sequence_number = iceberg_info->info.sequence_number;
+    }
+#endif
+
+    std::optional<size_t> object_size;
+    if (object_info.isArchive())
+        object_size = object_info.fileSizeInArchive();
+    else if (object_metadata->is_size_known)
+        object_size = object_metadata->size_bytes;
+
+    FailPointInjection::pauseFailPoint(FailPoints::object_storage_source_pause_before_virtual_columns);
+
+    VirtualColumnUtils::addRequestedFileLikeStorageVirtualsToChunk(
+        chunk,
+        read_from_format_info.requested_virtual_columns,
+        {
+            .path = path,
+            .storage_id = storage_id,
+            .size = object_size,
+            .filename = &filename,
+            /// Report an unknown modification time (e.g. a web object whose HTTP response has no
+            /// `Last-Modified` header) as `NULL` in `_time`, not as the default epoch `1970-01-01`.
+            .last_modified = object_metadata->is_last_modified_known
+                ? std::optional<Poco::Timestamp>(object_metadata->last_modified)
+                : std::nullopt,
+            .etag = &(object_metadata->etag),
+            .tags = &(object_metadata->tags),
+            .data_lake_snapshot_version = params.data_lake_snapshot_version,
+            .iceberg_metadata_file_path = iceberg_metadata_file_path,
+            .last_updated_sequence_number = last_updated_sequence_number,
+            .first_row_id = first_row_id,
+            .materialized_row_ids = materialized_row_ids,
+            .materialized_last_updated_sequence_numbers = materialized_last_updated_sequence_numbers,
+        },
+        read_context,
+        format_settings);
+
+    if (read_from_format_info.requested_virtual_columns.contains("_headers"))
+    {
+        auto type = std::make_shared<DataTypeMap>(
+            std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()),
+            std::make_shared<DataTypeLowCardinality>(std::make_shared<DataTypeString>()));
+
+        const Map headers = tryGetHeadersFromReadBuffer(unit.read_buf).value_or(objectAttributesToMap(object_metadata->attributes));
+
+        chunk.addColumn(type->createColumnConst(
+            chunk.getNumRows(),
+            headers)->convertToFullColumnIfConst());
+    }
+
+    if (unit.lazy_file_index)
+    {
+        /// Lazy materialization: append the `__global_row_index` column, which combines the
+        /// index of the file within the query with the physical row number within the file.
+        auto row_numbers_info = chunk.getChunkInfos().get<ChunkInfoRowNumbers>();
+        if (!row_numbers_info)
+            /// Only the Parquet reader provides physical row numbers. This is reachable for a
+            /// mixed-format Iceberg snapshot (the table-level format is Parquet, but an individual
+            /// data file has a different format), which is discovered only at read time because the
+            /// file list is built dynamically. Report an actionable error instead of failing later.
+            throw Exception(ErrorCodes::UNSUPPORTED_METHOD,
+                "Lazy materialization requires physical row numbers from the format reader, "
+                "but file {} (format {}) does not provide them. "
+                "Disable the query_plan_optimize_lazy_materialization_for_object_storage setting to read such data.",
+                object_info.getPath(), object_info.getFileFormat().value_or(configuration->format));
+
+        const auto & applied_filter = row_numbers_info->applied_filter;
+        size_t num_indices = applied_filter.has_value() ? applied_filter->size() : num_rows;
+        if (row_numbers_info->row_num_offset + num_indices > LazyObjectStorageFileRegistry::MAX_ROWS_PER_FILE)
+            throw Exception(ErrorCodes::TOO_MANY_ROWS,
+                "File {} has too many rows for lazy materialization. "
+                "Disable the query_plan_optimize_lazy_materialization_for_object_storage setting",
+                object_info.getPath());
+
+        const UInt64 file_part = *unit.lazy_file_index << LazyObjectStorageFileRegistry::ROW_INDEX_BITS;
+        auto row_index_column = ColumnUInt64::create();
+        auto & row_index_data = row_index_column->getData();
+        row_index_data.reserve(num_rows);
+        for (size_t i = 0; i < num_indices; ++i)
+        {
+            if (!applied_filter.has_value() || (*applied_filter)[i])
+                row_index_data.push_back(file_part | (row_numbers_info->row_num_offset + i));
+        }
+
+        if (row_index_column->size() != num_rows)
+            throw Exception(ErrorCodes::LOGICAL_ERROR,
+                "Row numbers of a chunk are inconsistent with the number of rows: {} != {} (file {})",
+                row_index_column->size(), num_rows, object_info.getPath());
+
+        chunk.addColumn(std::move(row_index_column));
+    }
+
+#if USE_PARQUET
+    if (unit.approx_bytes_read && chunk.hasColumns())
+    {
+        /// Old delta lake code which needs to be deprecated in favour of DeltaLakeMetadataDeltaKernel.
+        if (std::dynamic_pointer_cast<const DeltaLakeMetadata>(configuration->getExternalMetadata()))
+        {
+            /// This is an awful temporary crutch,
+            /// which will be removed once DeltaKernel is used by default for DeltaLake.
+            /// (Because it does not make sense to support it in a nice way
+            /// because the code will be removed ASAP anyway)
+            if (configuration->isDataLakeConfiguration())
+            {
+                /// A terrible crutch, but it this code will be removed next month.
+                DeltaLakePartitionColumns partition_columns;
+#if USE_AWS_S3
+                if (auto * delta_conf_s3 = dynamic_cast<StorageS3DeltaLakeConfiguration *>(configuration.get()))
+                {
+                    partition_columns = delta_conf_s3->getDeltaLakePartitionColumns();
+                }
+#endif
+#if USE_AZURE_BLOB_STORAGE
+                if (auto * delta_conf_azure = dynamic_cast<StorageAzureDeltaLakeConfiguration *>(configuration.get()))
+                {
+                    partition_columns = delta_conf_azure->getDeltaLakePartitionColumns();
+                }
+#endif
+                if (auto * delta_conf_local = dynamic_cast<StorageLocalDeltaLakeConfiguration *>(configuration.get()))
+                {
+                    partition_columns = delta_conf_local->getDeltaLakePartitionColumns();
+                }
+                if (!partition_columns.empty())
+                {
+                    auto partition_values = partition_columns.find(full_path);
+                    if (partition_values != partition_columns.end())
+                    {
+                        for (const auto & [name_and_type, value] : partition_values->second)
+                        {
+                            if (!read_from_format_info.source_header.has(name_and_type.name))
+                                continue;
+
+                            const auto column_pos = read_from_format_info.source_header.getPositionByName(name_and_type.name);
+                            auto partition_column = name_and_type.type->createColumnConst(chunk.getNumRows(), value)->convertToFullColumnIfConst();
+                            /// The `_delta_log` type differs from the declared one when the columns were
+                            /// specified rather than inferred, and the block follows the declared schema.
+                            const auto & declared_type = read_from_format_info.source_header.getByPosition(column_pos).type;
+                            if (!name_and_type.type->equals(*declared_type))
+                                partition_column = castColumn({partition_column, name_and_type.type, name_and_type.name}, declared_type);
+                            /// This column is filled with default value now, remove it.
+                            chunk.erase(column_pos);
+                            /// Add correct values.
+                            if (column_pos < chunk.getNumColumns())
+                                chunk.addColumn(column_pos, std::move(partition_column));
+                            else
+                                chunk.addColumn(std::move(partition_column));
+                        }
+                    }
+                }
+            }
+        }
+    }
+#endif
+
+    /// Convert any Const columns to full columns before returning.
+    /// This is necessary because when chunks with different Const values (e.g., partition columns
+    /// from different files in DeltaLake) are squashed together during INSERT, the squashing code
+    /// doesn't properly handle merging Const columns with different constant values.
+    /// By converting to full columns here, we ensure the values are preserved correctly.
+    if (chunk.hasColumns())
+    {
+        size_t chunk_num_rows = chunk.getNumRows();
+        auto columns = chunk.detachColumns();
+        for (auto & column : columns)
+        {
+            if (column->isConst())
+                column = column->cloneResized(chunk_num_rows)->convertToFullColumnIfConst();
+        }
+        chunk.setColumns(std::move(columns), chunk_num_rows);
+    }
+}
+
 void StorageObjectStorageSource::addTotalRowsApproxFromMetadata(const ObjectInfo & object_info)
 {
     /// A file split into buckets is read by several readers, so its number of rows would be counted
@@ -1318,6 +1348,50 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
     ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key,
     bool prefetch_input_format)
 {
+    auto unit = openReadUnit(
+        processor,
+        storage_id,
+        query_condition_cache_table_id,
+        file_iterator,
+        configuration,
+        object_storage,
+        read_from_format_info,
+        format_settings,
+        context_,
+        schema_cache,
+        log,
+        max_block_size,
+        parser_shared_resources,
+        format_filter_info,
+        need_only_count,
+        top_k_query_condition_cache_key,
+        prefetch_input_format);
+    if (!unit)
+        return {};
+
+    return buildNestedReader(
+        std::move(*unit), configuration, read_from_format_info, format_settings, context_, max_block_size, parser_shared_resources);
+}
+
+std::optional<StorageObjectStorageSource::OpenedReadUnit> StorageObjectStorageSource::openReadUnit(
+    size_t processor,
+    const StorageID & storage_id,
+    const UUID & query_condition_cache_table_id,
+    const std::shared_ptr<IObjectIterator> & file_iterator,
+    const StorageObjectStorageConfigurationPtr & configuration,
+    const ObjectStoragePtr & object_storage,
+    ReadFromFormatInfo & read_from_format_info,
+    const std::optional<FormatSettings> & format_settings,
+    const ContextPtr & context_,
+    SchemaCache * schema_cache,
+    const LoggerPtr & log,
+    size_t max_block_size,
+    FormatParserSharedResourcesPtr parser_shared_resources,
+    FormatFilterInfoPtr format_filter_info,
+    bool need_only_count,
+    ObjectStorageTopKQueryConditionCacheKeyPtr top_k_query_condition_cache_key,
+    bool prefetch_input_format)
+{
     ObjectInfoPtr object_info;
     bool use_top_k_query_condition_cache_key = false;
     bool skipped_row_groups_by_top_k_entry = false;
@@ -1375,7 +1449,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         object_info = file_iterator->next(processor);
 
         if (!object_info || object_info->getPath().empty())
-            return {};
+            return std::nullopt;
         if (!object_info->getObjectMetadata())
         {
             bool with_tags = read_from_format_info.requested_virtual_columns.contains("_tags");
@@ -1406,7 +1480,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
             {
                 auto metadata = tryGetObjectMetadataForRead(*object_storage, metadata_object, with_tags);
                 if (!metadata)
-                    return {};
+                    return std::nullopt;
 
                 object_info->setObjectMetadata(metadata.value());
             }
@@ -1512,10 +1586,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         break;
     }
 
-    std::unique_ptr<ReadBuffer> read_buf; /// Destroyed last: `builder` and `source` hold the input format reading it.
-    QueryPipelineBuilder builder;
-    std::shared_ptr<ISource> source;
-
+    std::unique_ptr<ReadBuffer> read_buf; /// Destroyed last: `input_format` reads it.
     Names row_lineage_columns;
 
     auto try_get_num_rows_from_cache = [&]() -> std::optional<size_t>
@@ -1573,20 +1644,14 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         = need_only_count && !headers_requested && context_->getSettingsRef()[Setting::use_cache_for_count_from_files]
         ? try_get_num_rows_from_cache() : std::nullopt;
 
+    OpenedReadUnit unit;
+    unit.object_info = object_info;
+    unit.use_top_k_query_condition_cache_key = use_top_k_query_condition_cache_key;
+    unit.skipped_row_groups_by_top_k_entry = skipped_row_groups_by_top_k_entry;
+
     if (num_rows_from_cache)
     {
-        /// We should not return single chunk with all number of rows,
-        /// because there is a chance that this chunk will be materialized later
-        /// (it can cause memory problems even with default values in columns or when virtual columns are requested).
-        /// Instead, we use special ConstChunkGenerator that will generate chunks
-        /// with max_block_size rows until total number of rows is reached.
-
-        auto names_and_types = read_from_format_info.columns_description.getAllPhysical();
-        ColumnsWithTypeAndName columns;
-        for (const auto & [name, type] : names_and_types)
-            columns.emplace_back(type->createColumn(), type, name);
-        builder.init(Pipe(std::make_shared<ConstChunkGenerator>(
-                              std::make_shared<const Block>(columns), *num_rows_from_cache, max_block_size)));
+        unit.num_rows_from_cache = num_rows_from_cache;
     }
     else
     {
@@ -1937,6 +2002,55 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
         if (prefetch_input_format)
             input_format->prefetch();
 
+        unit.read_buf = std::move(read_buf);
+        unit.input_format = std::move(input_format);
+        unit.row_lineage_columns = std::move(row_lineage_columns);
+        unit.identity_partition_columns = std::move(identity_partition_columns);
+        unit.stripped_row_level_filter = std::move(stripped_row_level_filter);
+        unit.stripped_prewhere_info = std::move(stripped_prewhere_info);
+    }
+
+    ProfileEvents::increment(ProfileEvents::EngineFileLikeReadFiles);
+
+    return unit;
+}
+
+StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildNestedReader(
+    OpenedReadUnit unit,
+    const StorageObjectStorageConfigurationPtr & configuration,
+    const ReadFromFormatInfo & read_from_format_info,
+    const std::optional<FormatSettings> & format_settings,
+    const ContextPtr & context_,
+    size_t max_block_size,
+    FormatParserSharedResourcesPtr parser_shared_resources)
+{
+    const auto & object_info = unit.object_info;
+    const auto & row_lineage_columns = unit.row_lineage_columns;
+    QueryPipelineBuilder builder;
+    std::shared_ptr<ISource> source;
+
+    if (unit.num_rows_from_cache)
+    {
+        /// We should not return single chunk with all number of rows,
+        /// because there is a chance that this chunk will be materialized later
+        /// (it can cause memory problems even with default values in columns or when virtual columns are requested).
+        /// Instead, we use special ConstChunkGenerator that will generate chunks
+        /// with max_block_size rows until total number of rows is reached.
+
+        auto names_and_types = read_from_format_info.columns_description.getAllPhysical();
+        ColumnsWithTypeAndName columns;
+        for (const auto & [name, type] : names_and_types)
+            columns.emplace_back(type->createColumn(), type, name);
+        builder.init(Pipe(std::make_shared<ConstChunkGenerator>(
+                              std::make_shared<const Block>(columns), *unit.num_rows_from_cache, max_block_size)));
+    }
+    else
+    {
+        const auto & input_format = unit.input_format;
+        const auto & identity_partition_columns = unit.identity_partition_columns;
+        const auto & stripped_row_level_filter = unit.stripped_row_level_filter;
+        const auto & stripped_prewhere_info = unit.stripped_prewhere_info;
+
         builder.init(Pipe(input_format));
 
         if (!identity_partition_columns.empty())
@@ -2120,11 +2234,9 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::createReade
     pipeline->disableProfileEventUpdate();
     auto current_reader = std::make_unique<PullingPipelineExecutor>(*pipeline);
 
-    ProfileEvents::increment(ProfileEvents::EngineFileLikeReadFiles);
-
-    ReaderHolder result(object_info, std::move(read_buf), std::move(source), std::move(pipeline), std::move(current_reader));
-    result.use_top_k_query_condition_cache_key = use_top_k_query_condition_cache_key;
-    result.skipped_row_groups_by_top_k_entry = skipped_row_groups_by_top_k_entry;
+    ReaderHolder result(object_info, std::move(unit.read_buf), std::move(source), std::move(pipeline), std::move(current_reader));
+    result.use_top_k_query_condition_cache_key = unit.use_top_k_query_condition_cache_key;
+    result.skipped_row_groups_by_top_k_entry = unit.skipped_row_groups_by_top_k_entry;
     return result;
 }
 
