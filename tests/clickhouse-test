@@ -2134,6 +2134,8 @@ class SettingsRandomizer:
         "max_bytes_for_external_set_cache": threshold_generator(
             0.2, 0.2, 0, 128 * 1024 * 1024
         ),
+        # The flat read pipeline of object storages and data lakes
+        "object_storage_flat_read_pipeline": lambda: random.randint(0, 1),
     }
 
     dependent_settings = {

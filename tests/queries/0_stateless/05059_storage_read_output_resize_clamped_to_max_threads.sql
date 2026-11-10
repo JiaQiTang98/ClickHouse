@@ -66,6 +66,7 @@ FROM (
 
 -- Carrier: ReadFromObjectStorageStep::initializePipeline. EXPLAIN only, so no endpoint is
 -- contacted; a single key keeps num_streams at 1 so the resize guard is reached.
+-- `object_storage_flat_read_pipeline = 0`: the flat read pipeline adds processors between the source and the resize.
 CREATE TABLE t_resize_object_storage (x UInt64, y String)
 ENGINE = S3('http://localhost:19999/dummy.parquet', NOSIGN, Parquet);
 
@@ -73,7 +74,7 @@ SELECT match(arrayStringConcat(groupArray(explain), ''), '.*Resize 1 → 2 *Read
 FROM (
     EXPLAIN PIPELINE SELECT * FROM t_resize_object_storage
     SETTINGS max_threads = 2, max_streams_to_max_threads_ratio = 1000000,
-             max_threads_min_free_memory_per_thread = 0
+             max_threads_min_free_memory_per_thread = 0, object_storage_flat_read_pipeline = 0
 );
 
 DROP TABLE t_resize_file;
