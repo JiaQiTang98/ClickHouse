@@ -142,8 +142,10 @@ ${CLICKHOUSE_CLIENT} --query "DESCRIBE ${REV_TF}" | cut -f1,2
 # required type instead of passing it through.
 ${CLICKHOUSE_CLIENT} --query "SELECT s FROM ${REV_TF} ORDER BY s"
 ${CLICKHOUSE_CLIENT} --query "SELECT s FROM ${REV_TF} WHERE id IS NOT NULL ORDER BY s"
-# `object_storage_flat_read_pipeline = 0`: the flat read pipeline brings the column which only `PREWHERE` reads to the
-# type of the table schema as well, so the NULL throws `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, as `SELECT id` does.
+# `object_storage_flat_read_pipeline = 0`: this checks that `IcebergSchemaProcessor` keeps optional to required as
+# a passthrough for a column which only `PREWHERE` reads, which the flat read pipeline cannot show: it converts such
+# a column to the type of the table schema as well, so the NULL throws `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, as
+# `SELECT id` does (see `05495_object_storage_flat_read_pipeline_required_column`).
 ${CLICKHOUSE_CLIENT} ${PREWHERE_SETTINGS} --object_storage_flat_read_pipeline=0 --query "SELECT s FROM ${REV_TF} PREWHERE id > 1 ORDER BY s"
 
 drop_table "${TABLE}"

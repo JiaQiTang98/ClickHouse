@@ -11427,7 +11427,9 @@ Allow to use hive partitioning with S3Queue/AzureQueue engines
     DECLARE(Bool, object_storage_flat_read_pipeline, false, R"(
 Build the per-file processing of object storage and data lake reads (deletes, stripped filters, defaults, column extraction) as processors of the main query pipeline instead of a nested pipeline per file.
 
-In this mode `read_rows` counts the rows read from files before position deletes, deletion vectors and filters not applied by the format reader, so the limits `max_rows_to_read` and `max_bytes_to_read` may trigger earlier than in the default mode.
+In this mode `read_rows` counts the rows read from files before equality deletes, position deletes, deletion vectors and filters not applied by the format reader, so the limits `max_rows_to_read` and `max_bytes_to_read` may trigger earlier than in the default mode.
+
+In this mode, the columns which only the filters read are converted to the types of the table schema as well, before the filters are applied. If a data file violates the table schema (e.g. it has NULLs in a column which external metadata made required), such a query throws `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, as reading the column does in both modes.
 )", EXPERIMENTAL, \
         {"26.11", false, false, "New experimental setting."}) \
 DECLARE(JoinOrderAlgorithm, query_plan_optimize_join_order_algorithm, "dpsub,greedy", R"(
