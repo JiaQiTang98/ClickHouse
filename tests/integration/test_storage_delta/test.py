@@ -5313,6 +5313,16 @@ deltaLake{suffix}({cluster}
     # (not 3 because third deleted row is inside a different partition and represents a single row inside it)
     assert node.contains_in_log("Row indexes size 2 for file")
 
+    # The flat read pipeline applies the deletion vectors in `ReadUnitDeletionVectorTransform`.
+    select_all = f"SELECT * FROM {delta_function} ORDER BY all"
+    flat_result = node.query(
+        select_all, settings={"object_storage_flat_read_pipeline": 1}
+    )
+    assert 2 == len(flat_result.strip().splitlines())
+    assert flat_result == node.query(
+        select_all, settings={"object_storage_flat_read_pipeline": 0}
+    )
+
     # A bare `count()` is eligible for the trivial-count optimization, which answers from the
     # `numRecords` statistics of the surviving files: 4 here, because the deletion vector removes
     # 2 more rows that those statistics still include. The assertions above use `ORDER BY all`,

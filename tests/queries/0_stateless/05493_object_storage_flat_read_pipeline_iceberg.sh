@@ -70,5 +70,28 @@ ${CLICKHOUSE_CLIENT} --object_storage_flat_read_pipeline=1 --query "
 ${CLICKHOUSE_CLIENT} --object_storage_flat_read_pipeline=0 --query "
     SELECT count() FROM (EXPLAIN PIPELINE SELECT k FROM ${TABLE} PREWHERE a = 1) WHERE explain LIKE '%ReadUnit%'"
 
+echo "-- exception in a filter applied after the format (ORC)"
+for flat in 0 1; do
+    ${CLICKHOUSE_CLIENT} --optimize_move_to_prewhere=1 --object_storage_flat_read_pipeline=${flat} --query "
+        SELECT count() FROM ${TABLE} PREWHERE throwIf(k = 45) = 0" 2>&1 \
+        | grep -oE "FUNCTION_THROW_IF_VALUE_IS_NON_ZERO|QUERY_WAS_CANCELLED" | head -1
+done
+
+echo "-- LIMIT stops the read"
+for flat in 0 1; do
+    ${CLICKHOUSE_CLIENT} --max_block_size=1 --max_threads=1 --object_storage_flat_read_pipeline=${flat} --query "
+        SELECT count() FROM (SELECT k FROM ${TABLE} LIMIT 1)"
+done
+
+echo "-- processors_profile_log"
+QUERY_ID="${CLICKHOUSE_DATABASE}_${RANDOM}_flat"
+${CLICKHOUSE_CLIENT} --query_id "${QUERY_ID}" --log_processors_profiles=1 --object_storage_flat_read_pipeline=1 --query "
+    SELECT k FROM ${TABLE} PREWHERE a = 1 FORMAT Null"
+${CLICKHOUSE_CLIENT} --query "SYSTEM FLUSH LOGS processors_profile_log"
+${CLICKHOUSE_CLIENT} --query "
+    SELECT DISTINCT name FROM system.processors_profile_log
+    WHERE event_date >= yesterday() AND query_id = '${QUERY_ID}' AND name LIKE 'ReadUnit%'
+    ORDER BY name"
+
 ${CLICKHOUSE_CLIENT} --query "DROP TABLE ${TABLE}"
 rm -rf "${TABLE_PATH}"

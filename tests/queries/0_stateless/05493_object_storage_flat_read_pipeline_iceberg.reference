@@ -19,3 +19,14 @@ ReadUnitFilterTransform
 ReadUnitIcebergPositionDeleteTransform
 ReadUnitDeletionVectorTransform
 0
+-- exception in a filter applied after the format (ORC)
+FUNCTION_THROW_IF_VALUE_IS_NON_ZERO
+FUNCTION_THROW_IF_VALUE_IS_NON_ZERO
+-- LIMIT stops the read
+1
+1
+-- processors_profile_log
+ReadUnitColumnsTransform
+ReadUnitDeletionVectorTransform
+ReadUnitFilterTransform
+ReadUnitIcebergPositionDeleteTransform
