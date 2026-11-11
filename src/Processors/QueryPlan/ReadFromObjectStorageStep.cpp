@@ -282,6 +282,11 @@ ReadUnitPipelineDescriptionPtr ReadFromObjectStorageStep::makeFlatReadPipelineDe
     if (std::dynamic_pointer_cast<const DeltaLakeMetadata>(configuration->getExternalMetadata()))
         return nullptr;
 #endif
+    /// The defaults of a data lake: the filters stripped from the format reader of a file with a schema transform
+    /// would see the default values, while the nested mode applies the filters before the defaults. The columns of
+    /// the data lakes come from their schemas without defaults, so it is not expected to happen.
+    if (configuration->isDataLakeConfiguration() && info.columns_description.hasDefaults())
+        return nullptr;
 
     /// The columns `requested_columns` are extracted from, as the format returns them.
     Block post_filter_header;
