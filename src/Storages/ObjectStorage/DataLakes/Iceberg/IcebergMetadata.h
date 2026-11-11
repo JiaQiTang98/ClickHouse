@@ -187,7 +187,10 @@ public:
 
     void modifyFormatSettings(FormatSettings & format_settings, const Context & local_context) const override;
     void addDeleteTransformers(ObjectInfoPtr object_info, QueryPipelineBuilder & builder, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override;
-    void addReadUnitTransforms(Pipe & pipe, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override;
+    std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override;
     std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
         ObjectInfoPtr object_info,
         const SharedHeader & header,

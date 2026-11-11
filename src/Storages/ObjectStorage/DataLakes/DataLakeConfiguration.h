@@ -17,6 +17,7 @@
 #include <Storages/ObjectStorage/HDFS/Configuration.h>
 #include <Storages/ObjectStorage/Local/Configuration.h>
 #include <Storages/ObjectStorage/S3/Configuration.h>
+#include <Storages/ObjectStorage/ReadUnitContext.h>
 #include <Storages/ObjectStorage/StorageObjectStorage.h>
 #include <Storages/StorageFactory.h>
 #include <Storages/ColumnsDescription.h>
@@ -492,9 +493,12 @@ public:
         getMetadata()->addDeleteTransformers(object_info, builder, format_settings, parser_shared_resources, local_context);
     }
 
-    void addReadUnitTransforms(Pipe & pipe, const std::optional<FormatSettings> & format_settings, FormatParserSharedResourcesPtr parser_shared_resources, ContextPtr local_context) const override
+    std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override
     {
-        getMetadata()->addReadUnitTransforms(pipe, format_settings, parser_shared_resources, local_context);
+        return getMetadata()->getReadUnitTransformFactories(format_settings, parser_shared_resources, local_context);
     }
 
     std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(

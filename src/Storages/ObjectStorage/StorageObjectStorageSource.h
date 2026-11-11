@@ -229,6 +229,8 @@ protected:
         bool filtersAppliedByReader() const { return filters_applied_by_reader; }
         /// Made on the first chunk.
         ReadUnitContextPtr read_unit_context;
+        /// The flat mode only: made with the reader (it may read the delete files), moved to `read_unit_context`.
+        std::vector<std::shared_ptr<ISimpleTransform>> read_unit_transforms;
 
         /// May be called in parallel with reading.
         void cancel() noexcept;

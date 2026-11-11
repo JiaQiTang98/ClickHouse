@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <mutex>
 #include <Core/Names.h>
 #include <Formats/FormatSettings.h>
@@ -43,6 +42,10 @@ struct ReadUnitPipelineDescription
     /// They are not read from a data file the format did not apply the filters for.
     NameSet columns_computed_by_filters;
 
+    /// The transforms specific to a data file, applied before the filters in this order: the deletion vectors
+    /// of `DataLakeObjectMetadata`, then those of the data lake (e.g. the Iceberg position deletes).
+    std::vector<ReadUnitTransformFactory> transform_factories;
+
     /// For `ExtractColumnsTransform` and `ReadUnitColumnsTransform`.
     ReadFromFormatInfo read_from_format_info;
     StorageObjectStorageConfigurationPtr configuration;
@@ -56,15 +59,13 @@ struct ReadUnitPipelineDescription
 
 using ReadUnitPipelineDescriptionPtr = std::shared_ptr<const ReadUnitPipelineDescription>;
 
-/// Applies to each chunk the transform made for the read unit (data file) of the chunk, e.g. the position deletes
-/// of the data file. Makes a new transform when the read unit changes. The transform must not change the header.
+/// Applies to each chunk the transform at position `index` of `ReadUnitContext::transforms` of the read unit
+/// (data file) of the chunk, e.g. the position deletes of the data file. The transforms are made by the source,
+/// see `ReadUnitTransformFactory`.
 class ReadUnitSwitchingTransform final : public ISimpleTransform
 {
 public:
-    /// Returns null if nothing has to be done for the read unit.
-    using Factory = std::function<std::shared_ptr<ISimpleTransform>(const ReadUnitContext &, const SharedHeader &)>;
-
-    ReadUnitSwitchingTransform(SharedHeader header_, String name_, Factory factory_);
+    ReadUnitSwitchingTransform(SharedHeader header_, String name_, size_t index_);
 
     String getName() const override { return name; }
 
@@ -75,7 +76,7 @@ protected:
 
 private:
     const String name;
-    const Factory factory;
+    const size_t index;
 
     ReadUnitContextPtr current_context;
     /// Guards `current_transform` from `onCancel`, which may be called in parallel with `transform`.
@@ -133,6 +134,10 @@ const ReadUnitContext & getReadUnitContext(const Chunk & chunk);
 /// Appends to each stream of a flat `StorageObjectStorageSource` the processors which do the processing
 /// of the read units which is not done by the source: the deletes, the stripped filters, the extraction
 /// of the subcolumns and the columns which are not read from the data files.
+/// Applies the deletion vectors of `DataLakeObjectMetadata`. They come with the data files (e.g. from DeltaKernel,
+/// or in the read tasks of a cluster read), so they are applied for any storage.
+ReadUnitTransformFactory makeDeletionVectorTransformFactory();
+
 void addReadUnitTransforms(Pipe & pipe, const ReadUnitPipelineDescriptionPtr & description);
 
 }

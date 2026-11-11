@@ -181,25 +181,19 @@ public:
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const;
 
-    /// See `IDataLakeMetadata::addReadUnitTransforms`.
-    virtual void addReadUnitTransforms(
-        Pipe & /*pipe*/,
-        const std::optional<FormatSettings> & /*format_settings*/,
-        FormatParserSharedResourcesPtr /*parser_shared_resources*/,
-        ContextPtr /*local_context*/) const
-    {
-    }
+    /// See `IDataLakeMetadata::getReadUnitTransformFactories`.
+    virtual std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const;
 
     /// See `IDataLakeMetadata::getEqualityDeleteFilters`.
     virtual std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
-        ObjectInfoPtr /*object_info*/,
-        const SharedHeader & /*header*/,
-        const std::optional<FormatSettings> & /*format_settings*/,
-        FormatParserSharedResourcesPtr /*parser_shared_resources*/,
-        ContextPtr /*local_context*/) const
-    {
-        return {};
-    }
+        ObjectInfoPtr object_info,
+        const SharedHeader & header,
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const;
 
     virtual ReadFromFormatInfo prepareReadingFromFormat(
         ObjectStoragePtr object_storage,

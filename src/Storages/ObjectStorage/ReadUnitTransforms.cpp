@@ -69,10 +69,10 @@ const ReadUnitContext & getReadUnitContext(const Chunk & chunk)
     return *info->context;
 }
 
-ReadUnitSwitchingTransform::ReadUnitSwitchingTransform(SharedHeader header_, String name_, Factory factory_)
+ReadUnitSwitchingTransform::ReadUnitSwitchingTransform(SharedHeader header_, String name_, size_t index_)
     : ISimpleTransform(header_, header_, /*skip_empty_chunks=*/true)
     , name(std::move(name_))
-    , factory(std::move(factory_))
+    , index(index_)
 {
 }
 
@@ -84,16 +84,17 @@ void ReadUnitSwitchingTransform::transform(Chunk & chunk)
 
     if (info->context != current_context)
     {
-        /// Release the previous transform (e.g. the delete files it keeps open) before making the next one.
-        {
-            std::lock_guard lock(current_transform_mutex);
-            current_transform.reset();
-        }
-        current_context = info->context;
+        const auto & transforms = info->context->transforms;
+        if (index >= transforms.size())
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "Read unit {} has {} transforms, but {} is at position {}",
+                info->context->object_info->getPath(), transforms.size(), name, index);
 
-        auto transform = factory(*current_context, getInputPort().getSharedHeader());
+        current_context = info->context;
         std::lock_guard lock(current_transform_mutex);
-        current_transform = std::move(transform);
+        /// Releases the previous transform (e.g. the delete files it keeps open).
+        current_transform = transforms[index];
         if (current_transform && isCancelled())
             current_transform->cancel();
     }
@@ -248,29 +249,32 @@ void ReadUnitColumnsTransform::transform(Chunk & chunk)
         });
 }
 
+ReadUnitTransformFactory makeDeletionVectorTransformFactory()
+{
+    return ReadUnitTransformFactory{
+        .name = "ReadUnitDeletionVectorTransform",
+        .make = [](const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
+        {
+            const auto & data_lake_metadata = object_info->data_lake_metadata;
+            if (!data_lake_metadata || !data_lake_metadata->excluded_rows || data_lake_metadata->excluded_rows->size() == 0)
+                return nullptr;
+            return std::make_shared<DeletionVectorTransform>(header, data_lake_metadata->excluded_rows);
+        }};
+}
+
 void addReadUnitTransforms(Pipe & pipe, const ReadUnitPipelineDescriptionPtr & description)
 {
     if (pipe.empty())
         return;
 
-    /// The deletion vectors come with the data files (e.g. from DeltaKernel, or in the read tasks of a cluster
-    /// read), so they are applied for any storage.
-    pipe.addSimpleTransform([](const SharedHeader & header)
+    for (size_t i = 0; i < description->transform_factories.size(); ++i)
     {
-        return std::make_shared<ReadUnitSwitchingTransform>(
-            header,
-            "ReadUnitDeletionVectorTransform",
-            [](const ReadUnitContext & unit, const SharedHeader & unit_header) -> std::shared_ptr<ISimpleTransform>
-            {
-                const auto & data_lake_metadata = unit.object_info->data_lake_metadata;
-                if (!data_lake_metadata || !data_lake_metadata->excluded_rows || data_lake_metadata->excluded_rows->size() == 0)
-                    return nullptr;
-                return std::make_shared<DeletionVectorTransform>(unit_header, data_lake_metadata->excluded_rows);
-            });
-    });
-
-    description->configuration->addReadUnitTransforms(
-        pipe, description->format_settings, description->parser_shared_resources, description->context);
+        const String & name = description->transform_factories[i].name;
+        pipe.addSimpleTransform([&](const SharedHeader & header)
+        {
+            return std::make_shared<ReadUnitSwitchingTransform>(header, name, i);
+        });
+    }
 
     if (description->hasFilters())
     {

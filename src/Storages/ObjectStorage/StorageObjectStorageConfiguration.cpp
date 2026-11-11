@@ -11,6 +11,7 @@
 #include <Storages/ColumnsDescription.h>
 #include <Storages/ObjectStorage/Common.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergPath.h>
+#include <Storages/ObjectStorage/ReadUnitContext.h>
 #include <Storages/StorageURL.h>
 #include <IO/CompressionMethod.h>
 
@@ -488,6 +489,18 @@ void StorageObjectStorageConfiguration::addDeleteTransformers(
     FormatParserSharedResourcesPtr,
     ContextPtr) const
 {
+}
+
+std::vector<ReadUnitTransformFactory> StorageObjectStorageConfiguration::getReadUnitTransformFactories(
+    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+{
+    return {};
+}
+
+std::vector<EqualityDeleteFilter> StorageObjectStorageConfiguration::getEqualityDeleteFilters(
+    ObjectInfoPtr, const SharedHeader &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+{
+    return {};
 }
 
 void StorageObjectStorageConfiguration::initializeFromParsedArguments(const StorageParsedArguments & parsed_arguments)

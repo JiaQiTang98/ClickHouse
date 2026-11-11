@@ -366,6 +366,9 @@ ReadUnitPipelineDescriptionPtr ReadFromObjectStorageStep::makeFlatReadPipelineDe
         if (!post_filter_header.has(column.name))
             description->columns_missing_if_filters_applied_by_reader.insert(column.name);
     description->columns_computed_by_filters = std::move(columns_computed_by_filters);
+    description->transform_factories.push_back(makeDeletionVectorTransformFactory());
+    for (auto & factory : configuration->getReadUnitTransformFactories(format_settings, parser_shared_resources, local_context))
+        description->transform_factories.push_back(std::move(factory));
     description->pre_filter_header = std::make_shared<const Block>(std::move(pre_filter_header));
     description->post_filter_header = std::make_shared<const Block>(std::move(post_filter_header));
     description->row_level_filter = row_level_filter;

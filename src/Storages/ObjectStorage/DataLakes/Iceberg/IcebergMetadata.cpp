@@ -2031,28 +2031,25 @@ void IcebergMetadata::addDeleteTransformers(
     }
 }
 
-void IcebergMetadata::addReadUnitTransforms(
-    Pipe & pipe,
+std::vector<ReadUnitTransformFactory> IcebergMetadata::getReadUnitTransformFactories(
     const std::optional<FormatSettings> & format_settings,
     FormatParserSharedResourcesPtr parser_shared_resources,
     ContextPtr local_context) const
 {
-    /// The transform may outlive the metadata, so it must not refer to it.
-    pipe.addSimpleTransform([&](const SharedHeader & header)
-    {
-        return std::make_shared<ReadUnitSwitchingTransform>(
-            header,
-            "ReadUnitIcebergPositionDeleteTransform",
-            [object_storage_ = object_storage, format_settings, parser_shared_resources, local_context](
-                const ReadUnitContext & unit, const SharedHeader & unit_header) -> std::shared_ptr<ISimpleTransform>
-            {
-                auto iceberg_object_info = std::dynamic_pointer_cast<IcebergDataObjectInfo>(unit.object_info);
-                if (!iceberg_object_info || !iceberg_object_info->info.hasPositionDeletes())
-                    return nullptr;
-                return iceberg_object_info->getPositionDeleteTransformer(
-                    object_storage_, unit_header, format_settings, parser_shared_resources, local_context);
-            });
-    });
+    /// The factory may outlive the metadata, so it must not refer to it.
+    ReadUnitTransformFactory position_deletes{
+        .name = "ReadUnitIcebergPositionDeleteTransform",
+        .make = [object_storage_ = object_storage, format_settings, parser_shared_resources, local_context](
+                    const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
+        {
+            auto iceberg_object_info = std::dynamic_pointer_cast<IcebergDataObjectInfo>(object_info);
+            if (!iceberg_object_info || !iceberg_object_info->info.hasPositionDeletes())
+                return nullptr;
+            /// Reads the position delete files.
+            return iceberg_object_info->getPositionDeleteTransformer(
+                object_storage_, header, format_settings, parser_shared_resources, local_context);
+        }};
+    return {std::move(position_deletes)};
 }
 
 std::vector<EqualityDeleteFilter> IcebergMetadata::getEqualityDeleteFilters(

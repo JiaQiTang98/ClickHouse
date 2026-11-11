@@ -1,4 +1,5 @@
 #include <Storages/ObjectStorage/DataLakes/IDataLakeMetadata.h>
+#include <Storages/ObjectStorage/ReadUnitContext.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
 #include <Storages/ObjectStorage/Utils.h>
 
@@ -86,6 +87,18 @@ ReadFromFormatInfo IDataLakeMetadata::prepareReadingFromFormat(
     bool supports_tuple_elements)
 {
     return DB::prepareReadingFromFormat(requested_columns, storage_snapshot, context, supports_subset_of_columns, supports_tuple_elements);
+}
+
+std::vector<ReadUnitTransformFactory> IDataLakeMetadata::getReadUnitTransformFactories(
+    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+{
+    return {};
+}
+
+std::vector<EqualityDeleteFilter> IDataLakeMetadata::getEqualityDeleteFilters(
+    ObjectInfoPtr, const SharedHeader &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+{
+    return {};
 }
 
 }

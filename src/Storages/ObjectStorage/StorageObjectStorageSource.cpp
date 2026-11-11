@@ -922,6 +922,7 @@ bool StorageObjectStorageSource::pullFlat(Chunk & chunk)
                 read_unit_context->headers = tryGetHeadersFromReadBuffer(reader.readBuffer())
                     .value_or(objectAttributesToMap(object_info->getObjectMetadata()->attributes));
             read_unit_context->data_lake_snapshot_version = file_iterator->getSnapshotVersion();
+            read_unit_context->transforms = std::move(reader.read_unit_transforms);
             reader.read_unit_context = std::move(read_unit_context);
         }
 
@@ -2394,8 +2395,14 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
         filters_applied_by_reader ? flat_read_pipeline.columns_missing_if_filters_applied_by_reader
                                   : flat_read_pipeline.columns_computed_by_filters);
 
+    std::vector<std::shared_ptr<ISimpleTransform>> transforms;
+    transforms.reserve(flat_read_pipeline.transform_factories.size());
+    for (const auto & factory : flat_read_pipeline.transform_factories)
+        transforms.push_back(factory.make(object_info, flat_read_pipeline.pre_filter_header));
+
     ReaderHolder result(
         object_info, std::move(unit.read_buf), std::move(unit.input_format), std::move(normalizer), filters_applied_by_reader);
+    result.read_unit_transforms = std::move(transforms);
     result.use_top_k_query_condition_cache_key = unit.use_top_k_query_condition_cache_key;
     result.skipped_row_groups_by_top_k_entry = unit.skipped_row_groups_by_top_k_entry;
     return result;
@@ -3035,6 +3042,7 @@ StorageObjectStorageSource::ReaderHolder::operator=(ReaderHolder && other) noexc
     flat_input_format = std::exchange(other.flat_input_format, nullptr);
     filters_applied_by_reader = other.filters_applied_by_reader;
     read_unit_context = std::move(other.read_unit_context);
+    read_unit_transforms = std::move(other.read_unit_transforms);
     source = std::move(other.source);
     read_buf = std::move(other.read_buf);
     object_info = std::move(other.object_info);

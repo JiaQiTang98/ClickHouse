@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <Core/Block_fwd.h>
 #include <Core/Field.h>
 #include <Processors/Chunk.h>
 
@@ -12,6 +14,8 @@ using ObjectInfoPtr = std::shared_ptr<ObjectInfo>;
 class ExpressionActions;
 using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
 
+class ISimpleTransform;
+
 /// A delete of the rows of a data file which have some values (e.g. an Iceberg equality delete file),
 /// as a filter over the chunks read from the file, before the schema transform.
 struct EqualityDeleteFilter
@@ -19,6 +23,17 @@ struct EqualityDeleteFilter
     ExpressionActionsPtr actions;
     /// The column added by `actions`, which is false for the deleted rows.
     String filter_column_name;
+};
+
+/// Makes a transform which applies something specific to a data file (read unit), e.g. its position deletes,
+/// to the chunks read from it. It is called by the source in the thread which opens the data file, so it may
+/// read files (e.g. the delete files) in parallel with reading the previous data file. The transform is applied
+/// by a `ReadUnitSwitchingTransform` named `name`, and must not change the header.
+struct ReadUnitTransformFactory
+{
+    String name;
+    /// Returns null if nothing has to be done for the data file.
+    std::function<std::shared_ptr<ISimpleTransform>(const ObjectInfoPtr &, const SharedHeader &)> make;
 };
 
 /// What the processors after `StorageObjectStorageSource` need to know about the data file (read unit)
@@ -36,6 +51,9 @@ struct ReadUnitContext
     /// The response headers of the file for `_headers`, set only if `_headers` is requested.
     std::optional<Map> headers;
     std::optional<UInt64> data_lake_snapshot_version;
+    /// Made by the factories `ReadUnitPipelineDescription::transform_factories`, at the same positions (null if
+    /// nothing has to be done). Only the `ReadUnitSwitchingTransform` of a position uses its transform.
+    std::vector<std::shared_ptr<ISimpleTransform>> transforms;
 };
 
 using ReadUnitContextPtr = std::shared_ptr<const ReadUnitContext>;
