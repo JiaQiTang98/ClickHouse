@@ -1261,7 +1261,7 @@ void StorageObjectStorageSource::addReadUnitColumns(
 
     ColumnPtr materialized_row_ids;
     ColumnPtr materialized_last_updated_sequence_numbers;
-    /// Without an input format the chunk comes from the count-from-cache path, which reads no
+    /// A chunk not read from the file comes from the count-from-cache path, which reads no
     /// file and therefore carries no row lineage columns.
     if (const auto lineage_columns = unit.read_from_file
             ? getMaterializedRowLineageColumns(

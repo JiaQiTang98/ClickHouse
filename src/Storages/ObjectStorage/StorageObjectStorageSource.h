@@ -321,8 +321,8 @@ protected:
         /// file is read under the names of another schema. They are applied to the chunks of the format.
         FilterDAGInfoPtr stripped_row_level_filter;
         PrewhereInfoPtr stripped_prewhere_info;
-        /// The format settings of the file if they differ from the ones of the read: an Iceberg data file with
-        /// streamed position deletes is read in order. The delete transforms get the same settings as the format.
+        /// Set only for an Iceberg data file with streamed position deletes, which is read in order
+        /// (`parquet.preserve_order`). The delete transforms get the same settings as the format reader.
         std::optional<FormatSettings> ordered_format_settings;
         /// The file is read with its initial schema (see `getInitialSchemaByPath`) instead of the format header.
         bool schema_changed = false;
@@ -332,8 +332,10 @@ protected:
         bool skipped_row_groups_by_top_k_entry = false;
     };
 
-    /// Takes the next data file from `file_iterator` and creates the reader of its format, or returns
-    /// nullopt if there are no more files. The arguments are the same as of `createReader`.
+    /// Takes the next data file from `file_iterator` and creates the reader of its format, unless the number of
+    /// rows is taken from the schema cache. Returns `std::nullopt` if there is nothing more to read: there are no
+    /// more files, or the next file does not exist and `ignore_non_existent_file` is set. The arguments are the
+    /// same as of `createReader`.
     static std::optional<OpenedReadUnit> openReadUnit(
         size_t processor,
         const StorageID & storage_id,
