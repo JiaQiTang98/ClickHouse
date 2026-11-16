@@ -2189,8 +2189,6 @@ std::optional<StorageObjectStorageSource::OpenedReadUnit> StorageObjectStorageSo
         unit.reads_file_under_own_names = reads_file_under_own_names;
     }
 
-    ProfileEvents::increment(ProfileEvents::EngineFileLikeReadFiles);
-
     return unit;
 }
 
@@ -2446,6 +2444,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildNested
     auto pipeline = std::make_unique<QueryPipeline>(QueryPipelineBuilder::getPipeline(std::move(builder)));
     pipeline->disableProfileEventUpdate();
     auto current_reader = std::make_unique<PullingPipelineExecutor>(*pipeline);
+
+    ProfileEvents::increment(ProfileEvents::EngineFileLikeReadFiles);
 
     ReaderHolder result(object_info, std::move(unit.read_buf), std::move(source), std::move(pipeline), std::move(current_reader));
     result.use_top_k_query_condition_cache_key = unit.use_top_k_query_condition_cache_key;
