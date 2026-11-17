@@ -2601,6 +2601,9 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
     for (const auto & factory : flat_read_pipeline.transform_factories)
         transforms.push_back(factory.make(object_info, flat_read_pipeline.pre_filter_header, object_format_settings));
 
+    /// The same as in `buildNestedReader`: after everything which reads the file is made.
+    ProfileEvents::increment(ProfileEvents::EngineFileLikeReadFiles);
+
     ReaderHolder result(
         object_info, std::move(unit.read_buf), std::move(unit.input_format), std::move(normalizer), filters_applied_by_reader);
     result.read_unit_transforms = std::move(transforms);
