@@ -37,6 +37,7 @@ FILE="${CLICKHOUSE_TEST_UNIQUE_NAME}/data.parquet"
 ${CLICKHOUSE_CLIENT} --query "
     INSERT INTO FUNCTION s3(s3_conn, filename = '${FILE}', format = Parquet) SELECT number AS a FROM numbers(10)
     SETTINGS s3_truncate_on_insert = 1"
-${CLICKHOUSE_CLIENT} --object_storage_flat_read_pipeline=1 --query "
+# With parallel replicas, `s3` would be read through its `-Cluster` storage, which has another pipeline.
+${CLICKHOUSE_CLIENT} --object_storage_flat_read_pipeline=1 --parallel_replicas_for_cluster_engines=0 --query "
     SELECT countIf(explain LIKE '%ReadUnitColumnsTransform%') > 0, countIf(explain LIKE '%DeletionVector%')
     FROM (EXPLAIN PIPELINE SELECT * FROM s3(s3_conn, filename = '${FILE}', format = Parquet))"

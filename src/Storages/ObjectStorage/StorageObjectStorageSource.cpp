@@ -81,7 +81,6 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
-#include <DataTypes/NestedUtils.h>
 
 #include <Storages/MergeTree/MarkRange.h>
 #include <Interpreters/Cache/QueryConditionCache.h>
@@ -2573,22 +2572,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
         {
             Names needed_names;
             for (const auto & column : pre_filter_header)
-            {
                 if (schema_transform->tryFindInOutputs(column.name))
-                {
                     needed_names.push_back(column.name);
-                    continue;
-                }
-                /// A tuple element requested as a column of its own is extracted from its column by the normalizer.
-                for (const auto & [column_name, subcolumn_name] : Nested::getAllColumnAndSubcolumnPairs(column.name))
-                {
-                    if (schema_transform->tryFindInOutputs(String(column_name)))
-                    {
-                        needed_names.emplace_back(column_name);
-                        break;
-                    }
-                }
-            }
             schema_transform->removeUnusedActions(needed_names);
         }
     }
