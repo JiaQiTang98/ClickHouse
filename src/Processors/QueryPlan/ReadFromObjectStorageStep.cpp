@@ -210,6 +210,8 @@ Pipe ReadFromObjectStorageStep::buildInOrderPipe(
         /*max_free_threads=*/ std::max<size_t>(1, num_streams),
         /*queue_size=*/ 0);
 
+    const auto flat_read_pipeline = makeFlatReadPipelineDescription(local_context, parser_shared_resources);
+
     Pipes pipes;
     pipes.reserve(num_files);
     for (const auto & object_info : read_in_order_files)
@@ -217,7 +219,7 @@ Pipe ReadFromObjectStorageStep::buildInOrderPipe(
         auto file_iterator = std::make_shared<SingleObjectIterator>(object_info, iterator_wrapper);
         file_iterator->setEmitProfileEvents(iterator_wrapper->emit_profile_events);
 
-        pipes.emplace_back(std::make_shared<StorageObjectStorageSource>(
+        Pipe pipe(std::make_shared<StorageObjectStorageSource>(
             storage_id,
             getName(),
             object_storage,
@@ -233,7 +235,12 @@ Pipe ReadFromObjectStorageStep::buildInOrderPipe(
             need_only_count,
             /*lazy_row_index_registry_=*/ nullptr,
             top_k_query_condition_cache_key,
-            shared_reader_pool));
+            shared_reader_pool,
+            flat_read_pipeline));
+        /// The per-file processors keep the order of the chunks of the file, and output `source_header`.
+        if (flat_read_pipeline)
+            addReadUnitTransforms(pipe, flat_read_pipeline);
+        pipes.emplace_back(std::move(pipe));
     }
 
     const size_t threshold = effectiveTwoLevelMergeThreshold(settings);
