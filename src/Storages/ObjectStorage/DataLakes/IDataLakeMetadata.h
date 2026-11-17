@@ -211,9 +211,9 @@ public:
 
     virtual void addDeleteTransformers(ObjectInfoPtr, QueryPipelineBuilder &, const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const { }
 
-    /// For `object_storage_flat_read_pipeline`: the transforms which apply the deletes of the data files, except
-    /// the equality deletes and the deletion vectors in `DataLakeObjectMetadata`. Each of them is applied by a
-    /// processor of the read, see `ReadUnitTransformFactory`.
+    /// For `object_storage_flat_read_pipeline`: the transforms which apply the deletes of the data files (e.g. the
+    /// position deletes and the deletion vectors), except the equality deletes, the same as `addDeleteTransformers`
+    /// adds in the nested read pipeline. Each of them is applied by a processor of the read, see `ReadUnitTransformFactory`.
     virtual std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
         const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const;
 

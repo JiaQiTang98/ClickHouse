@@ -1,0 +1,8 @@
+-- version 3: 100 rows written, then two deletes
+2 81	5947876357358976852
+-- latest version
+2 112	4223226933916906687
+-- pipeline
+ReadUnitDeltaLakeDeletionVectorTransform
+-- pipeline of a read of plain object storage files: flat, without a deletion vector processor
+1	0

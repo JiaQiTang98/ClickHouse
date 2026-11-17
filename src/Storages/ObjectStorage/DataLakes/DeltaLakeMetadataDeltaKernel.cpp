@@ -3,6 +3,9 @@
 
 #if USE_PARQUET && USE_DELTA_KERNEL_RS
 #include <Storages/ObjectStorage/DataLakes/DeltaLakeMetadataDeltaKernel.h>
+#include <AggregateFunctions/AggregateFunctionGroupBitmapData.h>
+#include <Storages/ObjectStorage/DataLakes/DeletionVectorTransform.h>
+#include <Storages/ObjectStorage/ReadUnitContext.h>
 #include <IO/ReadHelpers.h>
 #include <IO/WriteHelpers.h>
 #include <Storages/ObjectStorage/DataLakes/DeltaLake/TableSnapshot.h>
@@ -378,6 +381,46 @@ void DeltaLakeMetadataDeltaKernel::modifyFormatSettings(FormatSettings & format_
     /// There can be missing columns because of ALTER ADD/DROP COLUMN.
     /// So to support reading from such tables it is enough to turn on this setting.
     format_settings.parquet.allow_missing_columns = true;
+}
+
+namespace
+{
+
+bool hasDeletionVector(const ObjectInfo & object_info)
+{
+    return object_info.data_lake_metadata && object_info.data_lake_metadata->excluded_rows
+        && object_info.data_lake_metadata->excluded_rows->size() > 0;
+}
+
+}
+
+void DeltaLakeMetadataDeltaKernel::addDeleteTransformers(
+    ObjectInfoPtr object_info,
+    QueryPipelineBuilder & builder,
+    const std::optional<FormatSettings> &,
+    FormatParserSharedResourcesPtr,
+    ContextPtr) const
+{
+    if (!hasDeletionVector(*object_info))
+        return;
+    builder.addSimpleTransform([&](const SharedHeader & header)
+    {
+        return std::make_shared<DeletionVectorTransform>(header, object_info->data_lake_metadata->excluded_rows);
+    });
+}
+
+std::vector<ReadUnitTransformFactory> DeltaLakeMetadataDeltaKernel::getReadUnitTransformFactories(
+    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+{
+    ReadUnitTransformFactory deletion_vector{
+        .name = "ReadUnitDeltaLakeDeletionVectorTransform",
+        .make = [](const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
+        {
+            if (!hasDeletionVector(*object_info))
+                return nullptr;
+            return std::make_shared<DeletionVectorTransform>(header, object_info->data_lake_metadata->excluded_rows);
+        }};
+    return {std::move(deletion_vector)};
 }
 
 /// Returns non virtual column names, and virtual columns names and types.

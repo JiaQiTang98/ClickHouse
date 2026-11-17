@@ -61,6 +61,21 @@ public:
 
     void modifyFormatSettings(FormatSettings & format_settings, const Context &) const override;
 
+    /// Applies the deletion vector of a data file (`DataLakeObjectMetadata::excluded_rows`, which `TableSnapshot` reads),
+    /// in the nested read pipeline.
+    void addDeleteTransformers(
+        ObjectInfoPtr object_info,
+        QueryPipelineBuilder & builder,
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override;
+
+    /// The same for `object_storage_flat_read_pipeline`.
+    std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
+        const std::optional<FormatSettings> & format_settings,
+        FormatParserSharedResourcesPtr parser_shared_resources,
+        ContextPtr local_context) const override;
+
     static DataLakeMetadataPtr create(
         ObjectStoragePtr object_storage_,
         StorageObjectStorageConfigurationWeakPtr configuration,

@@ -6,7 +6,6 @@
 #include <Processors/Transforms/ExtractColumnsTransform.h>
 #include <Processors/Transforms/FilterTransform.h>
 #include <QueryPipeline/Pipe.h>
-#include <Storages/ObjectStorage/DataLakes/DeletionVectorTransform.h>
 #include <Storages/ObjectStorage/StorageObjectStorageConfiguration.h>
 #include <Storages/ObjectStorage/StorageObjectStorageSource.h>
 #include <Storages/SelectQueryInfo.h>
@@ -247,19 +246,6 @@ void ReadUnitColumnsTransform::transform(Chunk & chunk)
             .lazy_file_index = unit.lazy_file_index,
             .headers = unit.headers ? &*unit.headers : nullptr,
         });
-}
-
-ReadUnitTransformFactory makeDeletionVectorTransformFactory()
-{
-    return ReadUnitTransformFactory{
-        .name = "ReadUnitDeletionVectorTransform",
-        .make = [](const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
-        {
-            const auto & data_lake_metadata = object_info->data_lake_metadata;
-            if (!data_lake_metadata || !data_lake_metadata->excluded_rows || data_lake_metadata->excluded_rows->size() == 0)
-                return nullptr;
-            return std::make_shared<DeletionVectorTransform>(header, data_lake_metadata->excluded_rows);
-        }};
 }
 
 void addReadUnitTransforms(Pipe & pipe, const ReadUnitPipelineDescriptionPtr & description)

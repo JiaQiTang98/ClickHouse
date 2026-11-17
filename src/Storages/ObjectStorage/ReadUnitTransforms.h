@@ -42,8 +42,8 @@ struct ReadUnitPipelineDescription
     /// They are not read from a data file the format did not apply the filters for.
     NameSet columns_computed_by_filters;
 
-    /// The transforms specific to a data file, applied before the filters in this order: the deletion vectors
-    /// of `DataLakeObjectMetadata`, then those of the data lake (e.g. the Iceberg position deletes).
+    /// The transforms specific to a data file, applied before the filters in this order. Each data lake makes its
+    /// own (e.g. the Iceberg position deletes, the DeltaLake deletion vectors), see `getReadUnitTransformFactories`.
     std::vector<ReadUnitTransformFactory> transform_factories;
 
     /// For `ExtractColumnsTransform` and `ReadUnitColumnsTransform`.
@@ -134,10 +134,6 @@ const ReadUnitContext & getReadUnitContext(const Chunk & chunk);
 /// Appends to each stream of a flat `StorageObjectStorageSource` the processors which do the processing
 /// of the read units which is not done by the source: the deletes, the stripped filters, the extraction
 /// of the subcolumns and the columns which are not read from the data files.
-/// Applies the deletion vectors of `DataLakeObjectMetadata`. They come with the data files (e.g. from DeltaKernel,
-/// or in the read tasks of a cluster read), so they are applied for any storage.
-ReadUnitTransformFactory makeDeletionVectorTransformFactory();
-
 void addReadUnitTransforms(Pipe & pipe, const ReadUnitPipelineDescriptionPtr & description);
 
 }

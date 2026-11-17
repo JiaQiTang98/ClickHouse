@@ -5034,7 +5034,7 @@ deltaLake{suffix}({cluster}
     # (not 3 because third deleted row is inside a different partition and represents a single row inside it)
     assert node.contains_in_log("Row indexes size 2 for file")
 
-    # The flat read pipeline applies the deletion vectors in `ReadUnitDeletionVectorTransform`.
+    # The flat read pipeline applies the deletion vectors in `ReadUnitDeltaLakeDeletionVectorTransform`.
     select_all = f"SELECT * FROM {delta_function} ORDER BY all"
     flat_result = node.query(
         select_all, settings={"object_storage_flat_read_pipeline": 1}

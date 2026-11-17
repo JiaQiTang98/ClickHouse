@@ -47,7 +47,6 @@
 #include <Storages/SelectQueryInfo.h>
 #include <Storages/MergeTree/ColumnsCache.h>
 #include <Storages/ObjectStorage/DataLakes/DataLakeConfiguration.h>
-#include <Storages/ObjectStorage/DataLakes/DeletionVectorTransform.h>
 #include <Storages/ObjectStorage/DataLakes/Iceberg/IcebergDataObjectInfo.h>
 #include <Storages/ObjectStorage/S3/Configuration.h>
 #include <Storages/ObjectStorage/StorageObjectStorage.h>
@@ -2343,17 +2342,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildNested
             }
         }
 
+        /// The position deletes and the deletion vectors of the data lake.
         configuration->addDeleteTransformers(object_info, builder, object_format_settings, parser_shared_resources, context_);
-
-        if (object_info->data_lake_metadata
-            && object_info->data_lake_metadata->excluded_rows
-            && object_info->data_lake_metadata->excluded_rows->size() > 0)
-        {
-            builder.addSimpleTransform([&](const SharedHeader & header)
-            {
-                return std::make_shared<DeletionVectorTransform>(header, object_info->data_lake_metadata->excluded_rows);
-            });
-        }
 
         std::optional<ActionsDAG> schema_transform;
         if (object_info->data_lake_metadata && object_info->data_lake_metadata->schema_transform)
