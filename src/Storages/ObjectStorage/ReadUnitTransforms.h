@@ -54,7 +54,7 @@ struct ReadUnitPipelineDescription
     FormatParserSharedResourcesPtr parser_shared_resources;
     ContextPtr context;
 
-    bool hasFilters() const { return row_level_filter || prewhere_info; }
+    [[nodiscard]] bool hasFilters() const { return row_level_filter || prewhere_info; }
 };
 
 using ReadUnitPipelineDescriptionPtr = std::shared_ptr<const ReadUnitPipelineDescription>;

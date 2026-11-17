@@ -191,13 +191,12 @@ public:
         ContextPtr local_context) const;
 
     /// See `IDataLakeMetadata::getReadUnitTransformFactories`.
-    virtual std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
-        const std::optional<FormatSettings> & format_settings,
+    [[nodiscard]] virtual std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const;
 
     /// See `IDataLakeMetadata::getEqualityDeleteFilters`.
-    virtual std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
+    [[nodiscard]] virtual std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
         ObjectInfoPtr object_info,
         const SharedHeader & header,
         const std::optional<FormatSettings> & format_settings,

@@ -81,6 +81,7 @@
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeString.h>
 #include <DataTypes/DataTypesNumber.h>
+#include <DataTypes/NestedUtils.h>
 
 #include <Storages/MergeTree/MarkRange.h>
 #include <Interpreters/Cache/QueryConditionCache.h>
@@ -2465,17 +2466,8 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildNested
 
         if (stripped_prewhere_info)
         {
-            /// Like the format reader, the fallback keeps the columns that the format header lists.
-            auto prewhere_dag = stripped_prewhere_info->prewhere_actions.clone();
-            auto & prewhere_outputs = prewhere_dag.getOutputs();
-            for (const auto * input : prewhere_dag.getInputs())
-            {
-                if (read_from_format_info.format_header.has(input->result_name)
-                    && std::ranges::find(prewhere_outputs, input) == prewhere_outputs.end())
-                    prewhere_outputs.push_back(input);
-            }
-
-            auto prewhere_actions = std::make_shared<ExpressionActions>(std::move(prewhere_dag));
+            auto prewhere_actions = std::make_shared<ExpressionActions>(
+                makeStrippedPrewhereActions(*stripped_prewhere_info, read_from_format_info.format_header));
             builder.addSimpleTransform([&](const SharedHeader & header)
             {
                 return std::make_shared<FilterTransform>(
@@ -2565,19 +2557,40 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
     if (!unit.identity_partition_columns.empty())
         identity_partition_columns_dag = buildIdentityPartitionColumnsDag(*input_header, unit.identity_partition_columns);
 
+    /// The deletes get the format settings the data file is read with, as in `buildNestedReader`.
+    const auto & object_format_settings = unit.ordered_format_settings ? unit.ordered_format_settings : format_settings;
+
     auto equality_delete_filters
-        = configuration->getEqualityDeleteFilters(object_info, input_header, format_settings, parser_shared_resources, context_);
+        = configuration->getEqualityDeleteFilters(object_info, input_header, object_format_settings, parser_shared_resources, context_);
 
     /// The same as in `buildNestedReader`.
     std::optional<ActionsDAG> schema_transform;
     if (object_info->data_lake_metadata && object_info->data_lake_metadata->schema_transform)
     {
         schema_transform = object_info->data_lake_metadata->schema_transform->clone();
-        Names needed_names;
-        for (const auto & column : pre_filter_header)
-            if (schema_transform->tryFindInOutputs(column.name))
-                needed_names.push_back(column.name);
-        schema_transform->removeUnusedActions(needed_names);
+        /// A file read under its own schema has all its columns as inputs, as in the `getSchemaTransformer` case below.
+        if (!unit.schema_changed)
+        {
+            Names needed_names;
+            for (const auto & column : pre_filter_header)
+            {
+                if (schema_transform->tryFindInOutputs(column.name))
+                {
+                    needed_names.push_back(column.name);
+                    continue;
+                }
+                /// A tuple element requested as a column of its own is extracted from its column by the normalizer.
+                for (const auto & [column_name, subcolumn_name] : Nested::getAllColumnAndSubcolumnPairs(column.name))
+                {
+                    if (schema_transform->tryFindInOutputs(String(column_name)))
+                    {
+                        needed_names.emplace_back(column_name);
+                        break;
+                    }
+                }
+            }
+            schema_transform->removeUnusedActions(needed_names);
+        }
     }
     if (!schema_transform)
     {
@@ -2601,7 +2614,7 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
     std::vector<std::shared_ptr<ISimpleTransform>> transforms;
     transforms.reserve(flat_read_pipeline.transform_factories.size());
     for (const auto & factory : flat_read_pipeline.transform_factories)
-        transforms.push_back(factory.make(object_info, flat_read_pipeline.pre_filter_header));
+        transforms.push_back(factory.make(object_info, flat_read_pipeline.pre_filter_header, object_format_settings));
 
     ReaderHolder result(
         object_info, std::move(unit.read_buf), std::move(unit.input_format), std::move(normalizer), filters_applied_by_reader);
@@ -2609,6 +2622,18 @@ StorageObjectStorageSource::ReaderHolder StorageObjectStorageSource::buildFlatRe
     result.use_top_k_query_condition_cache_key = unit.use_top_k_query_condition_cache_key;
     result.skipped_row_groups_by_top_k_entry = unit.skipped_row_groups_by_top_k_entry;
     return result;
+}
+
+ActionsDAG StorageObjectStorageSource::makeStrippedPrewhereActions(const PrewhereInfo & prewhere_info, const Block & format_header)
+{
+    auto prewhere_dag = prewhere_info.prewhere_actions.clone();
+    auto & prewhere_outputs = prewhere_dag.getOutputs();
+    for (const auto * input : prewhere_dag.getInputs())
+    {
+        if (format_header.has(input->result_name) && std::ranges::find(prewhere_outputs, input) == prewhere_outputs.end())
+            prewhere_outputs.push_back(input);
+    }
+    return prewhere_dag;
 }
 
 std::future<StorageObjectStorageSource::ReaderHolder> StorageObjectStorageSource::createReaderAsync()

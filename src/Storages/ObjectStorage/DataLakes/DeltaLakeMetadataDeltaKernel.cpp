@@ -410,11 +410,12 @@ void DeltaLakeMetadataDeltaKernel::addDeleteTransformers(
 }
 
 std::vector<ReadUnitTransformFactory> DeltaLakeMetadataDeltaKernel::getReadUnitTransformFactories(
-    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+    FormatParserSharedResourcesPtr, ContextPtr) const
 {
     ReadUnitTransformFactory deletion_vector{
         .name = "ReadUnitDeltaLakeDeletionVectorTransform",
-        .make = [](const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
+        .make = [](const ObjectInfoPtr & object_info, const SharedHeader & header, const std::optional<FormatSettings> &)
+            -> std::shared_ptr<ISimpleTransform>
         {
             if (!hasDeletionVector(*object_info))
                 return nullptr;

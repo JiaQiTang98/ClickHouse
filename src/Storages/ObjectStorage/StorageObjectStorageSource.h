@@ -207,6 +207,10 @@ public:
     /// columns, from which the corresponding virtual columns are made. Converts constant columns to full ones.
     static void addReadUnitColumns(Chunk & chunk, const ReadUnitColumnsParams & params, const ReadUnitColumnsSource & unit);
 
+    /// The actions of `PREWHERE` applied after the format reader, which did not apply it. Like the format reader,
+    /// they keep the input columns that `format_header` lists.
+    [[nodiscard]] static ActionsDAG makeStrippedPrewhereActions(const PrewhereInfo & prewhere_info, const Block & format_header);
+
 protected:
     StorageID storage_id;
     const String name;
@@ -273,7 +277,7 @@ protected:
         ReaderHolder & operator=(ReaderHolder && other) noexcept;
 
         explicit operator bool() const { return reader != nullptr || normalizer != nullptr; }
-        bool isFlat() const { return normalizer != nullptr; }
+        [[nodiscard]] bool isFlat() const { return normalizer != nullptr; }
         PullingPipelineExecutor * operator->() { return reader.get(); }
         const PullingPipelineExecutor * operator->() const { return reader.get(); }
 
@@ -289,9 +293,9 @@ protected:
         [[nodiscard]] ReadBuffer * readBuffer() const { return read_buf.get(); }
 
         /// The flat mode only.
-        IInputFormat & getFlatInputFormat() const { return *flat_input_format; }
-        ReadUnitNormalizer & getNormalizer() const { return *normalizer; }
-        bool filtersAppliedByReader() const { return filters_applied_by_reader; }
+        [[nodiscard]] IInputFormat & getFlatInputFormat() const { return *flat_input_format; }
+        [[nodiscard]] ReadUnitNormalizer & getNormalizer() const { return *normalizer; }
+        [[nodiscard]] bool filtersAppliedByReader() const { return filters_applied_by_reader; }
         /// Made on the first chunk.
         ReadUnitContextPtr read_unit_context;
         /// The flat mode only: made with the reader (it may read the delete files), moved to `read_unit_context`.

@@ -2212,15 +2212,16 @@ void IcebergMetadata::addDeleteTransformers(
 }
 
 std::vector<ReadUnitTransformFactory> IcebergMetadata::getReadUnitTransformFactories(
-    const std::optional<FormatSettings> & format_settings,
     FormatParserSharedResourcesPtr parser_shared_resources,
     ContextPtr local_context) const
 {
     /// The factory may outlive the metadata, so it must not refer to it.
     ReadUnitTransformFactory position_deletes{
         .name = "ReadUnitIcebergPositionDeleteTransform",
-        .make = [object_storage_ = object_storage, format_settings, parser_shared_resources, local_context](
-                    const ObjectInfoPtr & object_info, const SharedHeader & header) -> std::shared_ptr<ISimpleTransform>
+        .make = [object_storage_ = object_storage, parser_shared_resources, local_context](
+                    const ObjectInfoPtr & object_info,
+                    const SharedHeader & header,
+                    const std::optional<FormatSettings> & format_settings) -> std::shared_ptr<ISimpleTransform>
         {
             auto iceberg_object_info = std::dynamic_pointer_cast<IcebergDataObjectInfo>(object_info);
             if (!iceberg_object_info || !iceberg_object_info->info.hasPositionDeletes())

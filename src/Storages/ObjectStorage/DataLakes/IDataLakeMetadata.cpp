@@ -107,7 +107,7 @@ ReadFromFormatInfo IDataLakeMetadata::prepareReadingFromFormat(
 }
 
 std::vector<ReadUnitTransformFactory> IDataLakeMetadata::getReadUnitTransformFactories(
-    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+    FormatParserSharedResourcesPtr, ContextPtr) const
 {
     return {};
 }

@@ -516,7 +516,7 @@ void StorageObjectStorageConfiguration::addDeleteTransformers(
 }
 
 std::vector<ReadUnitTransformFactory> StorageObjectStorageConfiguration::getReadUnitTransformFactories(
-    const std::optional<FormatSettings> &, FormatParserSharedResourcesPtr, ContextPtr) const
+    FormatParserSharedResourcesPtr, ContextPtr) const
 {
     return {};
 }

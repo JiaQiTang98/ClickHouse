@@ -159,7 +159,9 @@ ReadUnitFilterTransform::ReadUnitFilterTransform(const ReadUnitPipelineDescripti
 
     if (const auto & prewhere_info = description.prewhere_info)
     {
-        auto prewhere_actions = std::make_shared<ExpressionActions>(prewhere_info->prewhere_actions.clone());
+        /// The same as the fallback for `PREWHERE` in `StorageObjectStorageSource::buildNestedReader`.
+        auto prewhere_actions = std::make_shared<ExpressionActions>(StorageObjectStorageSource::makeStrippedPrewhereActions(
+            *prewhere_info, description.read_from_format_info.format_header));
         prewhere_transform = std::make_shared<FilterTransform>(
             header, prewhere_actions, prewhere_info->prewhere_column_name, prewhere_info->remove_prewhere_column,
             /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,

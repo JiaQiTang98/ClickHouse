@@ -7,6 +7,7 @@
 #include <Functions/IFunction.h>
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/castColumn.h>
+#include <Interpreters/createSubcolumnsExtractionActions.h>
 #include <Processors/Transforms/AddingDefaultsTransform.h>
 #include <Processors/Transforms/FilterTransform.h>
 #include <Storages/ColumnsDescription.h>
@@ -82,6 +83,25 @@ ReadUnitNormalizer::ReadUnitNormalizer(
 
     if (columns_description.hasDefaults())
         defaults_filler = std::make_unique<ColumnDefaultsFiller>(columns_description, context);
+
+    /// The same as the extraction of the subcolumns in `StorageObjectStorageSource::buildNestedReader`, but for any file
+    /// which does not have a column of `output_header` after the steps above, e.g. with schema evolution.
+    Block header_before_projection = *input_header;
+    size_t num_sample_rows = 0;
+    if (identity_partition_columns_actions)
+        identity_partition_columns_actions->execute(header_before_projection, num_sample_rows, /*dry_run=*/true);
+    if (schema_transform_actions)
+        schema_transform_actions->execute(header_before_projection, num_sample_rows, /*dry_run=*/true);
+    Names missing_columns;
+    for (const auto & column : *output_header)
+        if (!placeholder_columns.contains(column.name) && !header_before_projection.has(column.name))
+            missing_columns.push_back(column.name);
+    if (!missing_columns.empty())
+    {
+        auto subcolumns_extraction = createSubcolumnsExtractionActions(header_before_projection, missing_columns, context);
+        if (!subcolumns_extraction.getNodes().empty())
+            subcolumns_extraction_actions = std::make_shared<ExpressionActions>(std::move(subcolumns_extraction));
+    }
 }
 
 ReadUnitNormalizer::~ReadUnitNormalizer() = default;
@@ -152,6 +172,9 @@ void ReadUnitNormalizer::normalize(Chunk & chunk, const BlockMissingValues * mis
         }
         block.setColumns(filled.detachColumns());
     }
+
+    if (subcolumns_extraction_actions)
+        subcolumns_extraction_actions->execute(block, num_rows, /*dry_run=*/false, /*allow_duplicates_in_input=*/false, &is_cancelled);
 
     projectToOutputHeader(block, num_rows, chunk);
 }

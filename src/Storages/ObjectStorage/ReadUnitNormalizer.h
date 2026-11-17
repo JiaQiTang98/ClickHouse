@@ -21,6 +21,8 @@ class ColumnDefaultsFiller;
 /// - applies the equality deletes, which refer to the columns by the names in the data file;
 /// - applies the schema transform (renames, type changes, columns added by schema evolution);
 /// - replaces the values the format did not find in the file with the column defaults;
+/// - extracts the tuple elements H_pre has as columns of their own (see `filterTupleColumnsToRead`) from their
+///   columns, which a data file read under another schema has as a whole after the schema transform;
 /// - casts the columns to the types of H_pre, adds the placeholders and drops the others.
 /// Tracks the mask of the values the format did not find through these steps by the column names.
 class ReadUnitNormalizer
@@ -64,6 +66,8 @@ private:
     std::unordered_map<String, String> schema_transform_output_to_input;
     /// Null if there are no defaults.
     std::unique_ptr<ColumnDefaultsFiller> defaults_filler;
+    /// Null if all columns of `output_header` are in the chunks already.
+    ExpressionActionsPtr subcolumns_extraction_actions;
     const SharedHeader output_header;
     /// The columns of `output_header` which are not used for this data file: the inputs of the filters the format
     /// applied, or the outputs of `PREWHERE` which are computed after. They are added with default values even if

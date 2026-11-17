@@ -482,15 +482,14 @@ public:
         getMetadata()->addDeleteTransformers(object_info, builder, format_settings, parser_shared_resources, local_context);
     }
 
-    std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
-        const std::optional<FormatSettings> & format_settings,
+    [[nodiscard]] std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const override
     {
-        return getMetadata()->getReadUnitTransformFactories(format_settings, parser_shared_resources, local_context);
+        return getMetadata()->getReadUnitTransformFactories(parser_shared_resources, local_context);
     }
 
-    std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
+    [[nodiscard]] std::vector<EqualityDeleteFilter> getEqualityDeleteFilters(
         ObjectInfoPtr object_info,
         const SharedHeader & header,
         const std::optional<FormatSettings> & format_settings,

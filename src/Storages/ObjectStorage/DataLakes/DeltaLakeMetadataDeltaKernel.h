@@ -71,8 +71,7 @@ public:
         ContextPtr local_context) const override;
 
     /// The same for `object_storage_flat_read_pipeline`.
-    std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
-        const std::optional<FormatSettings> & format_settings,
+    [[nodiscard]] std::vector<ReadUnitTransformFactory> getReadUnitTransformFactories(
         FormatParserSharedResourcesPtr parser_shared_resources,
         ContextPtr local_context) const override;
 

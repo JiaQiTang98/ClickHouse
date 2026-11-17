@@ -17,6 +17,22 @@ from helpers.paimon_utils import (
 )
 
 
+def assert_same_in_flat_read_pipeline(instance, queries, settings=None):
+    """The flat read pipeline reads a file under its own names the same way."""
+    for query in queries:
+        results = [
+            instance.query(
+                query,
+                settings={
+                    **(settings or {}),
+                    "object_storage_flat_read_pipeline": flat,
+                },
+            )
+            for flat in [0, 1]
+        ]
+        assert results[0] == results[1], query
+
+
 @pytest.mark.parametrize("storage_type", ["s3", "azure"])
 def test_schema_evolution(started_cluster_paimon_with_spark, storage_type):
     """ADD COLUMN and DROP COLUMN across snapshots: files written with an older
@@ -277,6 +293,9 @@ def test_schema_evolution_drop_and_add_same_name(
             ["3", "\\N"],
             ["4", "dave@example.com"],
         ]
+        assert_same_in_flat_read_pipeline(
+            instance, [f"SELECT * FROM {table_expr} ORDER BY a"], settings=settings
+        )
 
 
 def test_schema_evolution_rotate_columns(started_cluster_paimon_with_spark):
@@ -329,6 +348,14 @@ def test_schema_evolution_rotate_columns(started_cluster_paimon_with_spark):
         )
         assert instance.query(query) == "1\t2\tx\n"
         assert instance.query(f"SELECT b FROM {table_name} ORDER BY b") == "x\ny\n"
+        assert_same_in_flat_read_pipeline(
+            instance,
+            [
+                f"SELECT c, a, b FROM {table_name} WHERE a = 2 SETTINGS use_query_condition_cache = 0",
+                f"SELECT b FROM {table_name} ORDER BY b",
+                f"SELECT * FROM {table_name} ORDER BY c",
+            ],
+        )
         schema, data = get_schema_and_data(instance, table_name, order_by="c")
         assert schema == [
             ["c", "Nullable(Int32)"],
@@ -418,6 +445,14 @@ def test_schema_evolution_row_column(started_cluster_paimon_with_spark):
     assert (
         instance.query(f"SELECT id, s2 FROM {table_expr} ORDER BY id")
         == "1\t(1,'a')\n2\t(2,'b')\n"
+    )
+    assert_same_in_flat_read_pipeline(
+        instance,
+        [
+            f"SELECT id, s2.y FROM {table_expr} ORDER BY id",
+            f"SELECT id FROM {table_expr} WHERE s2.y = 'a'",
+            f"SELECT id, s2 FROM {table_expr} ORDER BY id",
+        ],
     )
 
     for query in [

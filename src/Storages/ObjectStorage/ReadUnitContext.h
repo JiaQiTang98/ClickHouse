@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <Core/Block_fwd.h>
 #include <Core/Field.h>
 #include <Processors/Chunk.h>
@@ -15,6 +16,7 @@ class ExpressionActions;
 using ExpressionActionsPtr = std::shared_ptr<ExpressionActions>;
 
 class ISimpleTransform;
+struct FormatSettings;
 
 /// A delete of the rows of a data file which have some values (e.g. an Iceberg equality delete file),
 /// as a filter over the chunks read from the file, before the schema transform.
@@ -32,8 +34,11 @@ struct EqualityDeleteFilter
 struct ReadUnitTransformFactory
 {
     String name;
-    /// Returns null if nothing has to be done for the data file.
-    std::function<std::shared_ptr<ISimpleTransform>(const ObjectInfoPtr &, const SharedHeader &)> make;
+    /// Returns null if nothing has to be done for the data file. The format settings are the ones the data file
+    /// is read with, which may differ from the ones of the read (e.g. a Parquet file with streamed Iceberg position
+    /// deletes is read in order), the same as `addDeleteTransformers` gets in the nested read pipeline.
+    std::function<std::shared_ptr<ISimpleTransform>(
+        const ObjectInfoPtr &, const SharedHeader &, const std::optional<FormatSettings> &)> make;
 };
 
 /// What the processors after `StorageObjectStorageSource` need to know about the data file (read unit)
