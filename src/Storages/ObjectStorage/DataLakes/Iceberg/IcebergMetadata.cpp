@@ -2120,7 +2120,7 @@ EqualityDeleteFilter IcebergMetadata::makeEqualityDeleteFilter(
         has_time_equality_column
             ? std::make_shared<FormatFilterInfo>(nullptr, local_context, delete_mapper, nullptr, nullptr)
             : nullptr,
-        true,
+        object_storage->isRemote(),
         compression_method);
     /// only get the delete columns and construct a set by 'block_for_set'
     while (true)
