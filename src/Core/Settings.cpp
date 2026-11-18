@@ -11728,7 +11728,7 @@ Build the per-file processing of object storage and data lake reads (deletes, st
 
 In this mode `read_rows` counts the rows read from files before equality deletes, position deletes, deletion vectors and filters not applied by the format reader, so the limits `max_rows_to_read` and `max_bytes_to_read` may trigger earlier than in the default mode.
 
-In this mode, the columns which only the filters read are converted to the types of the table schema as well, before the filters are applied. If a data file violates the table schema (e.g. it has NULLs in a column which external metadata made required), such a query throws `CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN`, as reading the column does in both modes.
+In this mode, the columns of a data file are converted to the types of the table schema before the position deletes, the deletion vectors and the filters not applied by the format reader. If a data file violates the table schema (e.g. it has NULLs in a column which external metadata made required), the query throws also when only the rows which these remove have such values.
 )", EXPERIMENTAL, \
         {"26.11", false, false, "New experimental setting."}) \
 DECLARE(JoinOrderAlgorithm, query_plan_optimize_join_order_algorithm, "dpsub,greedy", R"(
