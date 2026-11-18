@@ -173,6 +173,24 @@ ReadUnitFilterTransform::ReadUnitFilterTransform(const ReadUnitPipelineDescripti
     filters_output_positions = getPositionsByName(*filters_output_header, post_filter_header);
 }
 
+IProcessor::Status ReadUnitFilterTransform::prepare()
+{
+    /// The early stop of `FilterTransform::prepare`, e.g. for `PREWHERE x IN (<empty subquery>)`: without it, all data
+    /// files would be read and all their rows filtered out. The filters are the same for all data files, also for
+    /// those the format applies them for, so no data file has to be read.
+    for (const auto & filter : {row_level_filter_transform, prewhere_transform})
+    {
+        if (filter && filter->isAlwaysFalse(output.isNeeded()))
+        {
+            input.close();
+            output.finish();
+            return Status::Finished;
+        }
+    }
+
+    return ISimpleTransform::prepare();
+}
+
 void ReadUnitFilterTransform::transform(Chunk & chunk)
 {
     const auto & pre_filter_header = getInputPort().getHeader();

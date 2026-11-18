@@ -53,6 +53,12 @@ public:
 
     void onCancel() noexcept override;
 
+    /// Whether the filter removes all rows, e.g. for `WHERE ignore(...)` or `WHERE x IN (<empty subquery>)`, so the input
+    /// does not have to be read. The sets of the expression are checked once, at the first call with `output_is_needed`:
+    /// they are ready once the output of the transform is needed. `prepare` calls it, and so can a processor which only
+    /// calls `transform` of this filter (e.g. `ReadUnitFilterTransform`) in its own `prepare`.
+    bool isAlwaysFalse(bool output_is_needed);
+
     static bool canUseType(const DataTypePtr & type);
 
     /// Compose `filter` (a dense mask over this chunk's pre-filter rows) into the chunk's

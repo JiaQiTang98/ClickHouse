@@ -93,6 +93,8 @@ public:
 
     String getName() const override { return "ReadUnitFilterTransform"; }
 
+    Status prepare() override;
+
     void transform(Chunk & chunk) override;
 
 protected:
@@ -104,7 +106,7 @@ private:
 
     /// The positions in `pre_filter_header` of the columns of the input header of the first filter.
     std::vector<size_t> filters_input_positions;
-    /// Null if there is no such filter. Only `transform` of them is called.
+    /// Null if there is no such filter. Only `transform` and `isAlwaysFalse` of them are called.
     std::shared_ptr<FilterTransform> row_level_filter_transform;
     std::shared_ptr<FilterTransform> prewhere_transform;
     /// The output header of the last filter.

@@ -459,14 +459,14 @@ FilterTransform::FilterTransform(
         query_condition_cache = Context::getGlobalContextInstance()->getQueryConditionCache();
 }
 
-IProcessor::Status FilterTransform::prepare()
+bool FilterTransform::isAlwaysFalse(bool output_is_needed)
 {
     /// Re-evaluate the filter on the header to enable constant-fold early exit
     /// for expressions like `WHERE 1 IN (subquery)` or `WHERE x IN (empty set)`
     /// where the result becomes known only after the set is built.
     /// Use updateHeader (dry-run) because sets may not be ready yet even when
     /// output.isNeeded() is true (e.g. delayed set creation in mutations).
-    if (!are_prepared_sets_initialized && output.isNeeded())
+    if (!are_prepared_sets_initialized && output_is_needed)
     {
         are_prepared_sets_initialized = true;
 
@@ -485,7 +485,12 @@ IProcessor::Status FilterTransform::prepare()
         }
     }
 
-    if (always_false && !on_totals)
+    return always_false && !on_totals;
+}
+
+IProcessor::Status FilterTransform::prepare()
+{
+    if (isAlwaysFalse(output.isNeeded()))
     {
         input.close();
         output.finish();
