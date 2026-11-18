@@ -150,6 +150,7 @@ ReadUnitFilterTransform::ReadUnitFilterTransform(const ReadUnitPipelineDescripti
 
         const String filter_column_name = row_level_filter_node->result_name;
         auto row_level_actions = std::make_shared<ExpressionActions>(std::move(row_level_dag));
+        set_spillables.add(row_level_actions->getActionsDAG());
         row_level_filter_transform = std::make_shared<FilterTransform>(
             header, row_level_actions, filter_column_name, remove_row_level_filter_column,
             /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,
@@ -162,6 +163,7 @@ ReadUnitFilterTransform::ReadUnitFilterTransform(const ReadUnitPipelineDescripti
         /// The same as the fallback for `PREWHERE` in `StorageObjectStorageSource::buildNestedReader`.
         auto prewhere_actions = std::make_shared<ExpressionActions>(StorageObjectStorageSource::makeStrippedPrewhereActions(
             *prewhere_info, description.read_from_format_info.format_header));
+        set_spillables.add(prewhere_actions->getActionsDAG());
         prewhere_transform = std::make_shared<FilterTransform>(
             header, prewhere_actions, prewhere_info->prewhere_column_name, prewhere_info->remove_prewhere_column,
             /*on_totals=*/false, /*rows_filtered=*/nullptr, /*condition=*/std::nullopt,

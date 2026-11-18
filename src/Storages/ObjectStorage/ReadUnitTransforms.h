@@ -3,6 +3,7 @@
 #include <mutex>
 #include <Core/Names.h>
 #include <Formats/FormatSettings.h>
+#include <Interpreters/SetSpillable.h>
 #include <Interpreters/StorageID.h>
 #include <Processors/ISimpleTransform.h>
 #include <Storages/ObjectStorage/ReadUnitContext.h>
@@ -97,10 +98,16 @@ public:
 
     void transform(Chunk & chunk) override;
 
+    /// The sets of `IN (subquery)` of the filters, which the executor may spill: the filters are not processors of the
+    /// pipeline, so it sees them only here.
+    std::span<ISpillable * const> getSpillables() override { return set_spillables.get(); }
+
 protected:
     void onCancel() noexcept override;
 
 private:
+    SetSpillables set_spillables;
+
     /// The positions in `pre_filter_header` of the columns of `post_filter_header`.
     std::vector<size_t> positions_if_filters_applied_by_reader;
 
