@@ -5035,13 +5035,17 @@ deltaLake{suffix}({cluster}
     assert node.contains_in_log("Row indexes size 2 for file")
 
     # The flat read pipeline applies the deletion vectors in `ReadUnitDeltaLakeDeletionVectorTransform`.
-    select_all = f"SELECT * FROM {delta_function} ORDER BY all"
-    flat_result = node.query(
-        select_all, settings={"object_storage_flat_read_pipeline": 1}
-    )
+    # Only the columns of the data files: a read of the partition column `a` uses the nested read pipeline.
+    select_data_columns = f"SELECT b, c FROM {delta_function} ORDER BY all"
+    flat_settings = {"object_storage_flat_read_pipeline": 1}
+    if not on_cluster:
+        assert "ReadUnitDeltaLakeDeletionVectorTransform" in node.query(
+            f"EXPLAIN PIPELINE {select_data_columns}", settings=flat_settings
+        )
+    flat_result = node.query(select_data_columns, settings=flat_settings)
     assert 2 == len(flat_result.strip().splitlines())
     assert flat_result == node.query(
-        select_all, settings={"object_storage_flat_read_pipeline": 0}
+        select_data_columns, settings={"object_storage_flat_read_pipeline": 0}
     )
 
     # A bare `count()` is eligible for the trivial-count optimization, which answers from the
